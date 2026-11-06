@@ -1,0 +1,15 @@
+# Ambiente e caches (recriados pelo start_app.bat)
+.venv/
+__pycache__/
+
+# Binarios do capturador .NET (recompilados pelo start_app.bat)
+native/ProcessLoopbackCapture/bin/
+native/ProcessLoopbackCapture/obj/
+
+# Dados pessoais: chave da API, preferencias e gravacoes
+config.json
+ui_config.json
+Recordings/
+
+# Configuracao local do Claude Code
+.claude/settings.local.json
