@@ -8,6 +8,11 @@ import json
 import subprocess
 import unicodedata
 import ctypes
+import io
+import re
+import zipfile
+import urllib.error
+import urllib.request
 from tkinter import messagebox, filedialog
 import pyaudiowpatch as pyaudio
 import assemblyai as aai
@@ -33,6 +38,10 @@ from ui_theme import (
 )
 
 # --- Configurações ---
+# Bump on every release: the updater compares it with the latest GitHub release tag.
+APP_VERSION = "1.1.4"
+UPDATE_REPO = "aloumamae/Real-time-transcriber"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
 ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "Icons", "voila_app.ico"))
 # Own taskbar identity. Without it Windows groups the window under pythonw.exe and shows Python's icon.
@@ -481,6 +490,58 @@ class TranscriptWindow(ctk.CTkToplevel):
         self.parent_app.transcript_window = None
         self.destroy()
 
+def version_tuple(tag):
+    """'v1.10.2' -> (1, 10, 2), so versions compare as numbers, not text."""
+    return tuple(int(part) for part in re.findall(r"\d+", tag))
+
+
+def github_get(url, token=""):
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "Voila-updater"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
+        return response.read()
+
+
+def github_error_text(error):
+    if isinstance(error, urllib.error.HTTPError):
+        if error.code in (401, 403):
+            return "Token do GitHub inválido ou expirado."
+        if error.code == 404:
+            return "Repositório ou release não encontrado. Confira o token do GitHub."
+        return f"GitHub respondeu com erro {error.code}."
+    if isinstance(error, urllib.error.URLError):
+        return "Sem conexão com o GitHub."
+    return f"Falha ao atualizar: {error}"
+
+
+def install_update(zip_bytes, app_dir):
+    """Overwrite the app's files with those from a GitHub release zip.
+
+    GitHub wraps the repo in one top folder; that prefix is stripped. Personal data
+    (config.json, Recordings/, .venv/) is not in the repo, so it is left untouched.
+    Everything is read before anything is written, so a broken download changes nothing.
+    """
+    root = os.path.normpath(app_dir)
+    files = {}
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        for info in archive.infolist():
+            relative = info.filename.split("/", 1)[1] if "/" in info.filename else ""
+            if not relative or info.is_dir():
+                continue
+            target = os.path.normpath(os.path.join(root, relative))
+            if not target.startswith(root + os.sep):
+                continue  # never write outside the app folder
+            files[target] = archive.read(info)
+    if not files:
+        raise RuntimeError("O pacote da atualização veio vazio.")
+    for target, data in files.items():
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as f:
+            f.write(data)
+    return len(files)
+
+
 class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -602,6 +663,20 @@ class SettingsWindow(ctk.CTkToplevel):
         self.entry_api.insert(0, self.parent_app.api_key)
         self.entry_api.bind("<KeyRelease>", self.on_value_changed)
 
+        # --- Atualizações ---
+        body = self._section("Atualizações", f"versão instalada {APP_VERSION}")
+        box = self._field(body, "Token do GitHub", "Token só de leitura, necessário porque o repositório é privado")
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 0))
+        self.btn_update = primary_button(row, "Atualizar", self.check_for_update, width=110, height=36)
+        self.btn_update.pack(side="right", padx=(8, 0))
+        self.entry_github_token = entry(row, show="•")
+        self.entry_github_token.pack(fill="x")
+        self.entry_github_token.insert(0, self.parent_app.github_token)
+        self.lbl_update = ctk.CTkLabel(box, text="", font=F["small"], text_color=C["muted"], anchor="w",
+                                       justify="left", wraplength=440)
+        self.lbl_update.pack(fill="x", pady=(4, 0))
+
         ctk.CTkFrame(self.settings_scroll, height=16, fg_color="transparent").pack()
 
         self._set_output_capture_controls_state()
@@ -634,6 +709,70 @@ class SettingsWindow(ctk.CTkToplevel):
 
     def _toggle_api_visibility(self):
         self.entry_api.configure(show="" if self.entry_api.cget("show") else "•")
+
+    def _set_update_status(self, text, busy=False):
+        try:
+            self.lbl_update.configure(text=text)
+            self.btn_update.configure(state="disabled" if busy else "normal")
+        except Exception:
+            pass  # window closed while the update thread was running
+
+    def _run_in_background(self, work, on_done):
+        """Run `work` off the UI thread, then `on_done(result_or_exception)` back on it."""
+        def worker():
+            try:
+                result = work()
+            except Exception as e:
+                result = e
+            self.parent_app.after(0, lambda: on_done(result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def check_for_update(self):
+        if self.parent_app.is_recording:
+            self._set_update_status("Pare a gravação antes de atualizar.")
+            return
+        token = self.entry_github_token.get().strip()
+        if token != self.parent_app.github_token:
+            self.parent_app.github_token = token
+            self.parent_app.save_config(show_message=False)
+        self._set_update_status("Procurando atualização...", busy=True)
+        url = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+        self._run_in_background(lambda: json.loads(github_get(url, token)),
+                                lambda release: self._on_latest_release(release, token))
+
+    def _on_latest_release(self, release, token):
+        if isinstance(release, Exception):
+            self._set_update_status(github_error_text(release))
+            return
+        tag = release.get("tag_name", "")
+        if version_tuple(tag) <= version_tuple(APP_VERSION):
+            self._set_update_status(f"Você já está na versão mais recente ({tag}).")
+            return
+        notes = (release.get("body") or "").strip()
+        if len(notes) > 700:
+            notes = notes[:700] + "..."
+        if not messagebox.askyesno(
+            "Atualização disponível",
+            f"{release.get('name') or tag} está disponível (você tem a {APP_VERSION}).\n\n{notes}\n\n"
+            "Atualizar agora? O Voilà vai fechar e abrir de novo.",
+            parent=self.parent_app,  # Settings may have been closed during the check
+        ):
+            self._set_update_status(f"Atualização {tag} disponível.")
+            return
+        if self.parent_app.is_recording:  # a recording may have started while the dialog was open
+            self._set_update_status("Pare a gravação antes de atualizar.")
+            return
+        self._set_update_status(f"Baixando {tag}...", busy=True)
+        self._run_in_background(lambda: install_update(github_get(release["zipball_url"], token), APP_DIR),
+                                self._on_update_installed)
+
+    def _on_update_installed(self, result):
+        if isinstance(result, Exception):
+            self._set_update_status(github_error_text(result))
+            return
+        # start_app.vbs also reinstalls the libraries when requirements.txt changed.
+        subprocess.Popen(["wscript.exe", os.path.join(APP_DIR, "start_app.vbs")], cwd=APP_DIR)
+        self.parent_app.quit()
 
     def bring_to_front(self):
         try:
@@ -969,6 +1108,7 @@ class TranscriptionApp(ctk.CTk):
 
         self.recorder = AudioRecorder()
         self.api_key = ""
+        self.github_token = ""
         self.is_recording = False
         self.streaming_client_mic = None
         self.streaming_client_sys = None
@@ -2187,6 +2327,7 @@ class TranscriptionApp(ctk.CTk):
                 with open(CONFIG_FILE, "r") as f:
                     config = json.load(f)
                     self.api_key = config.get("api_key", "")
+                    self.github_token = config.get("github_token", "")
                     self.user_name = config.get("user_name", "Você")
                     self.selected_mic = config.get("selected_mic", "")
                     self.selected_sys = config.get("selected_sys", "")
@@ -2201,6 +2342,7 @@ class TranscriptionApp(ctk.CTk):
     def save_config(self, show_message=True):
         config = {
             "api_key": self.api_key,
+            "github_token": self.github_token,
             "user_name": self.user_name,
             "realtime_transcript": self.realtime_transcript,
             "save_directory": self.save_directory,

@@ -68,6 +68,16 @@ O programa usa um serviço chamado AssemblyAI para transformar fala em texto. Vo
 
 **Pronto!** O programa vai abrir automaticamente a pasta com seu arquivo de texto.
 
+### 6. Atualize pelo próprio app
+
+Em **Configurações → Atualizações**, cole o token do GitHub e clique em **Atualizar**. Se houver versão nova, o app baixa, substitui os arquivos e abre de novo. Suas configurações e gravações ficam como estão.
+
+Como o repositório é privado, o token é obrigatório. Para criar um (quem é dono do repositório faz isso uma vez):
+github.com → Settings → Developer settings → **Fine-grained tokens** → Generate new token →
+*Repository access*: só `Real-time-transcriber` → *Permissions*: **Contents: Read-only**.
+
+Para quem publica: a cada release, aumente `APP_VERSION` no `main.py` para o mesmo número da tag (ex.: `1.1.4` → tag `v1.1.4`).
+
 ## 📁 Onde ficam os arquivos salvos?
 
 Os arquivos são salvos automaticamente na pasta `Recordings` dentro da pasta do programa:

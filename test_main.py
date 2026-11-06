@@ -5,7 +5,12 @@ import threading
 import unittest
 from types import SimpleNamespace
 
-from main import TranscriptWindow, TranscriptionApp, place_window, vu_level
+import io
+import os
+import tempfile
+import zipfile
+
+from main import TranscriptWindow, TranscriptionApp, install_update, place_window, version_tuple, vu_level
 
 
 class FakeTextbox:
@@ -364,6 +369,33 @@ class VuLevelTests(unittest.TestCase):
         self.assertTrue(0.4 < speech < 0.9, speech)
         self.assertEqual(vu_level(tone(32000)), 1.0)   # clipping: full
         self.assertEqual(vu_level(np.array([], dtype=np.int16)), 0.0)
+
+
+class UpdaterTests(unittest.TestCase):
+    def test_versions_compare_as_numbers(self):
+        self.assertGreater(version_tuple("v1.10.0"), version_tuple("1.9.9"))
+        self.assertEqual(version_tuple("v1.1.4"), version_tuple("1.1.4"))
+
+    def test_update_overwrites_app_files_but_keeps_personal_data(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("owner-repo-abc123/", "")
+            archive.writestr("owner-repo-abc123/main.py", "new")
+            archive.writestr("owner-repo-abc123/Icons/a.ico", "icon")
+            archive.writestr("owner-repo-abc123/../evil.txt", "x")
+        with tempfile.TemporaryDirectory() as parent:
+            app = os.path.join(parent, "app")
+            os.makedirs(app)
+            for name, text in (("main.py", "old"), ("config.json", "secret")):
+                with open(os.path.join(app, name), "w") as f:
+                    f.write(text)
+
+            self.assertEqual(install_update(buffer.getvalue(), app), 2)
+            read = lambda *p: open(os.path.join(*p)).read()
+            self.assertEqual(read(app, "main.py"), "new")
+            self.assertEqual(read(app, "Icons", "a.ico"), "icon")
+            self.assertEqual(read(app, "config.json"), "secret")
+            self.assertFalse(os.path.exists(os.path.join(parent, "evil.txt")))
 
 
 if __name__ == "__main__":
