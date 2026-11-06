@@ -6,6 +6,9 @@ __pycache__/
 native/ProcessLoopbackCapture/bin/
 native/ProcessLoopbackCapture/obj/
 
+# Atalho gerado pelo create_shortcut.ps1 (tem caminhos absolutos desta maquina)
+/*.lnk
+
 # Dados pessoais: chave da API, preferencias e gravacoes
 config.json
 ui_config.json

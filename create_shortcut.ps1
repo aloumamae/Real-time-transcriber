@@ -1,4 +1,5 @@
-# Cria o atalho "Voila" na Area de Trabalho e no Menu Iniciar, com o icone do app.
+# Cria o atalho "Voila" na pasta do projeto, na Area de Trabalho e no Menu Iniciar, com o icone do app.
+# O .lnk guarda caminhos absolutos, por isso nao vai para o Git (.gitignore): cada copia do projeto gera o seu.
 # O atalho leva o mesmo AppUserModelID que o main.py usa, entao o Windows agrupa a janela aberta
 # com o atalho (icone certo na barra de tarefas, "Fixar na barra de tarefas" funciona).
 # Arquivo so com ASCII de proposito: o PowerShell 5.1 le .ps1 sem BOM na codificacao do sistema.
@@ -42,7 +43,7 @@ public static class ShortcutAppId {
 '@
 
 $Shell = New-Object -ComObject WScript.Shell
-foreach ($Folder in [Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs")) {
+foreach ($Folder in $Dir, [Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs")) {
     $Path = Join-Path $Folder "$Name.lnk"
     $Link = $Shell.CreateShortcut($Path)
     $Link.TargetPath = "$env:WINDIR\System32\wscript.exe"

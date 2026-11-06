@@ -29,7 +29,7 @@ Dê dois cliques em **`start_app.bat`**. Ele faz tudo sozinho:
 
 - Se não tiver o **Python 3.12**, instala pelo Windows (winget). Depois disso, feche a janela e abra o `start_app.bat` de novo.
 - Cria um ambiente só do app (pasta `.venv`) e baixa as bibliotecas nas versões exatas testadas (`requirements.txt`). Leva alguns minutos, só na primeira vez.
-- Cria o atalho **Voilà** na Área de Trabalho e no Menu Iniciar, com o ícone do app.
+- Cria o atalho **Voilà** na pasta do app, na Área de Trabalho e no Menu Iniciar, com o ícone do app.
 - Abre o programa.
 
 Das próximas vezes, use o atalho **Voilà** (abre sem a janela preta, com o ícone na barra de tarefas; dá para fixar com botão direito → *Fixar na barra de tarefas*). Se as bibliotecas mudarem depois de uma atualização, ele roda a instalação de novo automaticamente.
