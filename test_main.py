@@ -20,8 +20,17 @@ class FakeTextbox:
     def configure(self, **kwargs):
         self.state = kwargs.get("state", self.state)
 
+    view = (0.0, 1.0)  # (top, bottom) fractions; bottom 1.0 = scrolled to the end
+    seen = 0
+
     def see(self, _index):
-        pass
+        self.seen += 1
+
+    def yview(self):
+        return self.view
+
+    def yview_moveto(self, fraction):
+        self.view = (fraction, self.view[1])
 
     def tag_config(self, *_args, **_kwargs):
         pass
@@ -136,6 +145,17 @@ class TranscriptPartialMarkTests(unittest.TestCase):
         self.assertNotIn("fala da Clarice", window.textbox.text)
         self.assertIn("fala dos outros", window.textbox.text)
         self.assertIn("Outros", window.partial_lines)
+
+    def test_autoscroll_only_while_reader_is_at_the_bottom(self):
+        window = make_transcript_window()
+        window.append_text("[10:00:00] Clarice: oi")
+        window.set_partial_line("Mic", "falando")
+        self.assertEqual(window.textbox.seen, 2)
+
+        window.textbox.view = (0.2, 0.5)  # user scrolled up to read history
+        window.append_text("[10:00:05] Clarice: nova linha")
+        window.set_partial_line("Mic", "falando mais")
+        self.assertEqual(window.textbox.seen, 2)
 
     def test_end_mark_uses_left_gravity_and_reset_unsets_marks(self):
         window = make_transcript_window()

@@ -351,10 +351,19 @@ class TranscriptWindow(ctk.CTkToplevel):
 
         Finals always sit above the partial lines, so line N == history[N-1].
         """
+        follow = self.at_bottom()
         self.textbox.configure(state="normal")
         self._insert_line("end-1c" if line_no is None else f"{line_no}.0", text, is_error)
-        self.textbox.see("end")
+        if follow:
+            self.textbox.see("end")
         self.textbox.configure(state="disabled")
+
+    def at_bottom(self):
+        """True when the view shows the end, so new lines should keep it pinned there.
+
+        Scrolled up = the user is reading history; leave the view where it is.
+        """
+        return self.textbox.yview()[1] >= 0.999
 
     def _insert_line(self, index, text, is_error=False):
         # Exactly one text line per entry keeps line numbers == history positions.
@@ -375,6 +384,7 @@ class TranscriptWindow(ctk.CTkToplevel):
         """One partial line per `source` key; `speaker` is the name shown (defaults to the key)."""
         line = self._format_line(speaker or source, text, timestamp)
         line_text = line + "\n"
+        follow = self.at_bottom()
         self.textbox.configure(state="normal")
         if source in self.partial_lines:
             start_mark, end_mark = self.partial_lines[source]
@@ -392,7 +402,8 @@ class TranscriptWindow(ctk.CTkToplevel):
                 self._insert_new_partial_line(source, line_text)
         else:
             self._insert_new_partial_line(source, line_text)
-        self.textbox.see("end")
+        if follow:
+            self.textbox.see("end")
         self.textbox.configure(state="disabled")
 
     def _insert_new_partial_line(self, source, line_text):
@@ -2135,17 +2146,24 @@ class TranscriptionApp(ctk.CTk):
         if not (self.transcript_window and self.transcript_window.winfo_exists()):
             return
         window = self.transcript_window
+        follow = window.at_bottom()
+        top = window.textbox.yview()[0]
         window.reset_partial_lines()
         window.textbox.configure(state="normal")
         window.textbox.delete("1.0", "end")
         for entry_msg, entry_err, _ in self.transcript_history:
             window._insert_line("end-1c", entry_msg, entry_err)
-        window.textbox.see("end")
         window.textbox.configure(state="disabled")
 
         # Append partials after finalized entries
         for source, (text, ts) in sorted(self.partial_transcripts.items(), key=lambda x: x[1][1]):
             self.transcript_window.set_partial_line(source, text, ts, self._speaker(source))
+
+        # A rebuild must not yank a reader back to the end either.
+        if follow:
+            window.textbox.see("end")
+        else:
+            window.textbox.yview_moveto(top)
 
     def open_transcript_window(self):
         if self.transcript_window is None or not self.transcript_window.winfo_exists():
