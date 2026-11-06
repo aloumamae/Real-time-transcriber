@@ -7,6 +7,7 @@ import time
 import json
 import subprocess
 import unicodedata
+import ctypes
 from tkinter import messagebox, filedialog
 import pyaudiowpatch as pyaudio
 import assemblyai as aai
@@ -33,7 +34,11 @@ from ui_theme import (
 
 # --- Configurações ---
 CONFIG_FILE = "config.json"
-ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "icons", "voila_logo.ico"))
+ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "Icons", "voila_logo.ico"))
+# Own taskbar identity. Without it Windows groups the window under pythonw.exe and shows Python's icon.
+# Must match $AppId in create_shortcut.ps1 so the running window groups with the shortcut / pinned icon.
+APP_ID = "Voila.Transcriber"
+ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
 CHUNK_SIZE = 4096
 # VU meter range in dBFS: quiet room sits near the floor, loud speech near the ceiling.
 VU_FLOOR_DB = -60.0
