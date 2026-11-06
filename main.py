@@ -39,7 +39,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -717,62 +717,12 @@ class SettingsWindow(ctk.CTkToplevel):
         except Exception:
             pass  # window closed while the update thread was running
 
-    def _run_in_background(self, work, on_done):
-        """Run `work` off the UI thread, then `on_done(result_or_exception)` back on it."""
-        def worker():
-            try:
-                result = work()
-            except Exception as e:
-                result = e
-            self.parent_app.after(0, lambda: on_done(result))
-        threading.Thread(target=worker, daemon=True).start()
-
     def check_for_update(self):
-        if self.parent_app.is_recording:
-            self._set_update_status("Pare a gravação antes de atualizar.")
-            return
         token = self.entry_github_token.get().strip()
         if token != self.parent_app.github_token:
             self.parent_app.github_token = token
             self.parent_app.save_config(show_message=False)
-        self._set_update_status("Procurando atualização...", busy=True)
-        url = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
-        self._run_in_background(lambda: json.loads(github_get(url, token)),
-                                lambda release: self._on_latest_release(release, token))
-
-    def _on_latest_release(self, release, token):
-        if isinstance(release, Exception):
-            self._set_update_status(github_error_text(release))
-            return
-        tag = release.get("tag_name", "")
-        if version_tuple(tag) <= version_tuple(APP_VERSION):
-            self._set_update_status(f"Você já está na versão mais recente ({tag}).")
-            return
-        notes = (release.get("body") or "").strip()
-        if len(notes) > 700:
-            notes = notes[:700] + "..."
-        if not messagebox.askyesno(
-            "Atualização disponível",
-            f"{release.get('name') or tag} está disponível (você tem a {APP_VERSION}).\n\n{notes}\n\n"
-            "Atualizar agora? O Voilà vai fechar e abrir de novo.",
-            parent=self.parent_app,  # Settings may have been closed during the check
-        ):
-            self._set_update_status(f"Atualização {tag} disponível.")
-            return
-        if self.parent_app.is_recording:  # a recording may have started while the dialog was open
-            self._set_update_status("Pare a gravação antes de atualizar.")
-            return
-        self._set_update_status(f"Baixando {tag}...", busy=True)
-        self._run_in_background(lambda: install_update(github_get(release["zipball_url"], token), APP_DIR),
-                                self._on_update_installed)
-
-    def _on_update_installed(self, result):
-        if isinstance(result, Exception):
-            self._set_update_status(github_error_text(result))
-            return
-        # start_app.vbs also reinstalls the libraries when requirements.txt changed.
-        subprocess.Popen(["wscript.exe", os.path.join(APP_DIR, "start_app.vbs")], cwd=APP_DIR)
-        self.parent_app.quit()
+        self.parent_app.check_for_update(self._set_update_status)
 
     def bring_to_front(self):
         try:
@@ -1160,6 +1110,72 @@ class TranscriptionApp(ctk.CTk):
         self.populate_devices()
         self._fit_to_content()
         self.after(50, self.process_queue)
+        if self.github_token:
+            # Off the UI thread and after the window is up: no internet / no update = nothing shown.
+            self.after(1500, self.check_for_update)
+
+    # --- Atualização (startup check and the Settings button share this) ---
+
+    def _run_in_background(self, work, on_done):
+        """Run `work` off the UI thread, then `on_done(result_or_exception)` back on it."""
+        def worker():
+            try:
+                result = work()
+            except Exception as e:
+                result = e
+            self.after(0, lambda: on_done(result))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def check_for_update(self, status=lambda text, busy=False: None):
+        """`status` shows progress in Settings; the silent startup check passes none,
+        so only an actual update (a dialog) is ever shown to the user."""
+        if self.is_recording:
+            status("Pare a gravação antes de atualizar.")
+            return
+        status("Procurando atualização...", busy=True)
+        token = self.github_token
+        url = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+        self._run_in_background(lambda: json.loads(github_get(url, token)),
+                                lambda release: self._on_latest_release(release, token, status))
+
+    def _on_latest_release(self, release, token, status):
+        if isinstance(release, Exception):
+            status(github_error_text(release))
+            return
+        tag = release.get("tag_name", "")
+        if version_tuple(tag) <= version_tuple(APP_VERSION):
+            status(f"Você já está na versão mais recente ({tag}).")
+            return
+        if self.is_recording:  # recording started during the check: don't interrupt it
+            status(f"Atualização {tag} disponível. Pare a gravação para atualizar.")
+            return
+        notes = (release.get("body") or "").strip()
+        if len(notes) > 700:
+            notes = notes[:700] + "..."
+        if not messagebox.askyesno(
+            "Atualização disponível",
+            f"{release.get('name') or tag} está disponível (você tem a {APP_VERSION}).\n\n{notes}\n\n"
+            "Atualizar agora? O Voilà vai fechar e abrir de novo.",
+            parent=self,
+        ):
+            status(f"Atualização {tag} disponível.")
+            return
+        if self.is_recording:  # a recording may have started while the dialog was open
+            status("Pare a gravação antes de atualizar.")
+            return
+        status(f"Baixando {tag}...", busy=True)
+        self._run_in_background(lambda: install_update(github_get(release["zipball_url"], token), APP_DIR),
+                                lambda result: self._on_update_installed(result, status))
+
+    def _on_update_installed(self, result, status):
+        if isinstance(result, Exception):
+            # The user said yes, so always say why it failed (the startup check has no status line).
+            status(github_error_text(result))
+            messagebox.showerror("Atualização", github_error_text(result), parent=self)
+            return
+        # start_app.vbs also reinstalls the libraries when requirements.txt changed.
+        subprocess.Popen(["wscript.exe", os.path.join(APP_DIR, "start_app.vbs")], cwd=APP_DIR)
+        self.quit()
 
     def _run_hidden_command(self, cmd, timeout_sec=4):
         creationflags = 0

@@ -372,6 +372,29 @@ class VuLevelTests(unittest.TestCase):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_startup_check_only_interrupts_when_there_is_an_update(self):
+        import main
+        app = object.__new__(TranscriptionApp)
+        app.is_recording = False
+        asked = []
+        original = main.messagebox.askyesno
+        main.messagebox.askyesno = lambda *a, **k: asked.append(a) or False
+        try:
+            silent = lambda text, busy=False: None
+            app._on_latest_release(ConnectionError("offline"), "", silent)
+            app._on_latest_release({"tag_name": f"v{main.APP_VERSION}"}, "", silent)
+            self.assertEqual(asked, [])
+
+            app.is_recording = True  # never interrupt a meeting
+            app._on_latest_release({"tag_name": "v99.0.0"}, "", silent)
+            self.assertEqual(asked, [])
+
+            app.is_recording = False
+            app._on_latest_release({"tag_name": "v99.0.0"}, "", silent)
+            self.assertEqual(len(asked), 1)
+        finally:
+            main.messagebox.askyesno = original
+
     def test_versions_compare_as_numbers(self):
         self.assertGreater(version_tuple("v1.10.0"), version_tuple("1.9.9"))
         self.assertEqual(version_tuple("v1.1.4"), version_tuple("1.1.4"))
