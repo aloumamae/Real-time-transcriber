@@ -34,7 +34,7 @@ Dê dois cliques em **`start_app.bat`**. Ele faz tudo sozinho:
 
 Das próximas vezes, use o atalho **Voilà** (abre sem a janela preta, com o ícone na barra de tarefas; dá para fixar com botão direito → *Fixar na barra de tarefas*). Se as bibliotecas mudarem depois de uma atualização, ele roda a instalação de novo automaticamente.
 
-Se o atalho sumir ou a pasta do app mudar de lugar, recrie com botão direito em **`create_shortcut.ps1`** → *Executar com o PowerShell*.
+O app funciona em qualquer pasta. **Mudou a pasta de lugar** (ou o atalho sumiu)? Abra o **`start_app.bat`** da pasta nova uma vez: ele refaz os atalhos apontando para lá.
 
 > O Windows pode mostrar "O Windows protegeu o computador" na primeira vez. Clique em **Mais informações → Executar assim mesmo**. Isso aparece para qualquer programa sem assinatura digital.
 

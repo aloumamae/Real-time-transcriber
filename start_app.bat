@@ -18,9 +18,10 @@ rem 2) Ambiente isolado do app (.venv) com as versoes exatas do requirements.txt
 if not exist ".venv\Scripts\pythonw.exe" (
     echo Preparando o app pela primeira vez, pode levar alguns minutos...
     py -3.12 -m venv .venv || goto :erro
-    rem Atalho "Voila" na Area de Trabalho e no Menu Iniciar, com icone e agrupamento na barra de tarefas.
-    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create_shortcut.ps1" >nul 2>&1
 )
+rem Atalho "Voila" (pasta do app, Area de Trabalho, Menu Iniciar) sempre apontando para ESTA pasta.
+rem Recriado toda vez que o .bat roda: se a pasta mudou de lugar, abrir o .bat uma vez conserta os atalhos.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0create_shortcut.ps1" >nul 2>&1
 fc /b requirements.txt .venv\installed.txt >nul 2>&1
 if errorlevel 1 (
     echo Instalando bibliotecas...
