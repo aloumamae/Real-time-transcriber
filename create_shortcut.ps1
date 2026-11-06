@@ -49,7 +49,7 @@ foreach ($Folder in $Dir, [Environment]::GetFolderPath("Desktop"), [Environment]
     $Link.TargetPath = "$env:WINDIR\System32\wscript.exe"
     $Link.Arguments = "`"$Dir\start_app.vbs`""
     $Link.WorkingDirectory = $Dir
-    $Link.IconLocation = "$Dir\Icons\voila_logo.ico,0"
+    $Link.IconLocation = "$Dir\Icons\voila_app.ico,0"
     $Link.Description = "$Name | Never lose the thread"
     $Link.Save()
     [ShortcutAppId]::Set($Path, $AppId)
