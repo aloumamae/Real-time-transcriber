@@ -35,6 +35,18 @@ from ui_theme import (
 CONFIG_FILE = "config.json"
 ICON_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "icons", "voila_logo.ico"))
 CHUNK_SIZE = 4096
+# VU meter range in dBFS: quiet room sits near the floor, loud speech near the ceiling.
+VU_FLOOR_DB = -60.0
+VU_CEIL_DB = -10.0
+
+
+def vu_level(samples):
+    """PCM16 samples -> 0..1 meter value (RMS in dBFS mapped onto the VU range)."""
+    if not len(samples):
+        return 0.0
+    rms = np.sqrt(np.mean(np.square(samples, dtype=np.float64)))
+    db = 20 * np.log10(max(rms, 1.0) / 32768.0)
+    return float(min(max((db - VU_FLOOR_DB) / (VU_CEIL_DB - VU_FLOOR_DB), 0.0), 1.0))
 
 # Initialize theme system
 apply_theme(theme_manager.load_theme_preference())
@@ -139,8 +151,7 @@ class AudioRecorder:
             if on_mic_data:
                 on_mic_data(audio_data.tobytes())
             try:
-                vol = np.linalg.norm(audio_data) / 500
-                on_mic_level(min(vol, 100))
+                on_mic_level(vu_level(audio_data))
             except: pass
             return (in_data, pyaudio.paContinue)
 
@@ -155,8 +166,7 @@ class AudioRecorder:
             if on_sys_data:
                 on_sys_data(audio_data.tobytes())
             try:
-                vol = np.linalg.norm(audio_data) / 500
-                on_sys_level(min(vol, 100))
+                on_sys_level(vu_level(audio_data))
             except: pass
             return (in_data, pyaudio.paContinue)
 
@@ -256,6 +266,11 @@ class TranscriptWindow(ctk.CTkToplevel):
         )
         icon_button(header, ICON["zoom_in"], self.zoom_in).pack(side="right")
         icon_button(header, ICON["zoom_out"], self.zoom_out).pack(side="right", padx=(0, 4))
+        # Mirrors the main window's status (Conectando / Gravando / Salvo) without touching the transcript.
+        status = parent.lbl_status
+        self.lbl_status = ctk.CTkLabel(header, text=status.cget("text"), font=F["small"],
+                                       text_color=status.cget("text_color"))
+        self.lbl_status.pack(side="right", padx=(0, 12))
 
         self.textbox = ctk.CTkTextbox(
             self,
@@ -351,8 +366,9 @@ class TranscriptWindow(ctk.CTkToplevel):
             time_str = datetime.datetime.now().strftime("%H:%M:%S")
         return f"[{time_str}] {source}: {text}"
 
-    def set_partial_line(self, source, text, timestamp=None):
-        line = self._format_line(source, text, timestamp)
+    def set_partial_line(self, source, text, timestamp=None, speaker=None):
+        """One partial line per `source` key; `speaker` is the name shown (defaults to the key)."""
+        line = self._format_line(speaker or source, text, timestamp)
         line_text = line + "\n"
         self.textbox.configure(state="normal")
         if source in self.partial_lines:
@@ -1070,6 +1086,11 @@ class TranscriptionApp(ctk.CTk):
         else:
             self.btn_record.configure(text="●   Iniciar gravação", fg_color=C["accent"], hover_color=C["accent_hover"])
 
+    def set_status(self, text, color):
+        self.lbl_status.configure(text=text, text_color=color)
+        if self.transcript_window and self.transcript_window.winfo_exists():
+            self.transcript_window.lbl_status.configure(text=text, text_color=color)
+
     def _tick_timer(self):
         start = self.recorder.start_time
         if not self.is_recording or not start:
@@ -1232,16 +1253,16 @@ class TranscriptionApp(ctk.CTk):
             self.mic_enabled = bool(self.switch_mic_enabled.get())
             if not self.mic_enabled:
                 self.progress_mic.set(0)
-                self.partial_transcripts.pop(self.user_name, None)
+                self.partial_transcripts.pop("mic", None)
                 if self.transcript_window and self.transcript_window.winfo_exists():
-                    self.transcript_window.clear_partial_line(self.user_name)
+                    self.transcript_window.clear_partial_line("mic")
         else:
             self.sys_enabled = bool(self.switch_sys_enabled.get())
             if not self.sys_enabled:
                 self.progress_sys.set(0)
-                self.partial_transcripts.pop(self.participants, None)
+                self.partial_transcripts.pop("sys", None)
                 if self.transcript_window and self.transcript_window.winfo_exists():
-                    self.transcript_window.clear_partial_line(self.participants)
+                    self.transcript_window.clear_partial_line("sys")
         self.save_config(show_message=False)
 
     def _list_running_apps(self):
@@ -1427,8 +1448,7 @@ class TranscriptionApp(ctk.CTk):
                         callback(chunk)
                     try:
                         audio_data = np.frombuffer(chunk, dtype=np.int16)
-                        vol = np.linalg.norm(audio_data) / 500 if audio_data.size else 0
-                        self.transcript_queue.put(("VU", "sys", min(vol, 100)))
+                        self.transcript_queue.put(("VU", "sys", vu_level(audio_data)))
                     except Exception:
                         pass
 
@@ -1439,8 +1459,7 @@ class TranscriptionApp(ctk.CTk):
                     callback(chunk)
                 try:
                     audio_data = np.frombuffer(chunk, dtype=np.int16)
-                    vol = np.linalg.norm(audio_data) / 500 if audio_data.size else 0
-                    self.transcript_queue.put(("VU", "sys", min(vol, 100)))
+                    self.transcript_queue.put(("VU", "sys", vu_level(audio_data)))
                 except Exception:
                     pass
 
@@ -1529,7 +1548,8 @@ class TranscriptionApp(ctk.CTk):
 
         self._set_record_button(True)
         self.open_transcript_window()
-        self.log_transcript("App", "Iniciando conexão...", False)
+        self.set_status("● Conectando...", C["warning"])
+        self.update_idletasks()  # connect() below blocks; paint the status first
 
         try:
             stream_sys_rate = self.sys_capture_rate if self.sys_capture_mode == "App específico" else sys_info[2]
@@ -1537,10 +1557,11 @@ class TranscriptionApp(ctk.CTk):
 
         except Exception as e:
             self.stop_recording_cleanup()
+            self.set_status("● Falha na conexão", C["danger"])
             self.log_transcript("CRITICO", str(e), True)
             return
 
-        self.lbl_status.configure(text="● Gravando", text_color=C["success"])
+        self.set_status("● Gravando", C["success"])
         
         # Store audio queues for streaming
         self.mic_audio_queue = queue.Queue()
@@ -1559,7 +1580,7 @@ class TranscriptionApp(ctk.CTk):
         self._tick_timer()
 
     def stop_recording(self):
-        self.lbl_status.configure(text="● Salvando...", text_color=C["warning"])
+        self.set_status("● Salvando...", C["warning"])
         try:
             final_meeting_title = self.meeting_title
             final_user_name = self.user_name
@@ -1612,7 +1633,7 @@ class TranscriptionApp(ctk.CTk):
             self.stop_recording_cleanup()
             # Fallback error handling
             try:
-                self.lbl_status.configure(text="● Erro ao salvar", text_color=C["danger"])
+                self.set_status("● Erro ao salvar", C["danger"])
             except:
                 pass
 
@@ -1643,13 +1664,17 @@ class TranscriptionApp(ctk.CTk):
         self.progress_mic.set(0)
         self.progress_sys.set(0)
 
-    def log_transcript(self, source, text, is_error=False, timestamp=None):
+    def _speaker(self, channel):
+        """Display name for a channel, read live so mid-meeting renames apply."""
+        return self.user_name if channel == "mic" else self.participants
+
+    def log_transcript(self, source, text, is_error=False, timestamp=None, channel=None):
         if timestamp:
             time_str = timestamp.strftime("%H:%M:%S")
         else:
             time_str = datetime.datetime.now().strftime("%H:%M:%S")
         msg = f"[{time_str}] {source}: {text}"
-        self.transcript_queue.put(("TXT", msg, is_error, timestamp or datetime.datetime.now(), source))
+        self.transcript_queue.put(("TXT", msg, is_error, timestamp or datetime.datetime.now(), channel or source))
 
         if self.is_recording and not is_error:
             if getattr(self, 'current_txt_path', None):
@@ -1711,7 +1736,7 @@ class TranscriptionApp(ctk.CTk):
                         last_ts = self.last_partial_update.get(source, 0.0)
                         if time.time() - last_ts >= (self.render_interval_ms / 1000.0):
                             self.last_partial_update[source] = time.time()
-                            self.transcript_window.set_partial_line(source, text, ts)
+                            self.transcript_window.set_partial_line(source, text, ts, self._speaker(source))
         except: pass
         self.after(50, self.process_queue)
 
@@ -1720,8 +1745,10 @@ class TranscriptionApp(ctk.CTk):
         return
 
     def _on_turn(self, client: StreamingClient, event: TurnEvent, source_name):
+        # source_name is the channel ("mic"/"sys"), never the display name:
+        # renaming a speaker mid-turn must not orphan that turn's partial line.
         turn_key = (source_name, event.turn_order)
-        source_enabled = self.mic_enabled if source_name == self.user_name else self.sys_enabled
+        source_enabled = self.mic_enabled if source_name == "mic" else self.sys_enabled
         if not source_enabled:
             if event.end_of_turn:
                 with self.audio_timeline_lock:
@@ -1757,7 +1784,7 @@ class TranscriptionApp(ctk.CTk):
             timestamp = datetime.datetime.now()
 
         if event.transcript and not event.end_of_turn:
-            other = self.participants if source_name == self.user_name else self.user_name
+            other = "sys" if source_name == "mic" else "mic"
             self.last_interrupt_time[source_name] = datetime.datetime.now()
             self._maybe_force_endpoint(other)
 
@@ -1772,7 +1799,7 @@ class TranscriptionApp(ctk.CTk):
                 self.partial_transcripts.pop(source_name, None)
                 self.partial_block_until[source_name] = datetime.datetime.now() + datetime.timedelta(milliseconds=600)
                 self.last_final_text[source_name] = event.transcript
-                self.log_transcript(source_name, event.transcript, False, timestamp)
+                self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
                 with self.audio_timeline_lock:
                     self.turn_start_times.pop(turn_key, None)
             else:
@@ -1785,21 +1812,15 @@ class TranscriptionApp(ctk.CTk):
                         self.turn_start_times.pop(turn_key, None)
                     return
                 self.last_final_turn_order[source_name] = event.turn_order
-                self.log_transcript(source_name, event.transcript, False, timestamp)
+                self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
                 with self.audio_timeline_lock:
                     self.turn_start_times.pop(turn_key, None)
 
     def _reset_audio_timeline(self, ready=True):
         """Reset stream offsets when a new pair of API connections is used."""
         with self.audio_timeline_lock:
-            self.audio_stream_position_ms = {
-                self.user_name: 0.0,
-                self.participants: 0.0,
-            }
-            self.audio_wall_segments = {
-                self.user_name: [],
-                self.participants: [],
-            }
+            self.audio_stream_position_ms = {"mic": 0.0, "sys": 0.0}
+            self.audio_wall_segments = {"mic": [], "sys": []}
             self.turn_start_times.clear()
             self.audio_timeline_ready = ready
             self.audio_timeline_generation += 1
@@ -1860,9 +1881,9 @@ class TranscriptionApp(ctk.CTk):
         if last_forced and (now - last_forced).total_seconds() * 1000 < self.interrupt_cooldown_ms:
             return
         try:
-            if source_name == self.user_name and self.streaming_client_mic:
+            if source_name == "mic" and self.streaming_client_mic:
                 self.streaming_client_mic.force_endpoint()
-            elif source_name == self.participants and self.streaming_client_sys:
+            elif source_name == "sys" and self.streaming_client_sys:
                 self.streaming_client_sys.force_endpoint()
             self.last_forced_time[source_name] = now
         except Exception:
@@ -1896,13 +1917,13 @@ class TranscriptionApp(ctk.CTk):
 
         # Set up event handlers for microphone client
         self.streaming_client_mic.on(StreamingEvents.Begin, lambda client, event: self._on_begin(client, event, "Microfone"))
-        self.streaming_client_mic.on(StreamingEvents.Turn, lambda client, event: self._on_turn(client, event, self.user_name))
+        self.streaming_client_mic.on(StreamingEvents.Turn, lambda client, event: self._on_turn(client, event, "mic"))
         self.streaming_client_mic.on(StreamingEvents.Error, lambda client, error: self._on_error(client, error, "Microfone"))
         self.streaming_client_mic.on(StreamingEvents.Termination, lambda client, event: self._on_terminated(client, event, "Microfone"))
 
         # Set up event handlers for system audio client
         self.streaming_client_sys.on(StreamingEvents.Begin, lambda client, event: self._on_begin(client, event, "Sistema"))
-        self.streaming_client_sys.on(StreamingEvents.Turn, lambda client, event: self._on_turn(client, event, self.participants))
+        self.streaming_client_sys.on(StreamingEvents.Turn, lambda client, event: self._on_turn(client, event, "sys"))
         self.streaming_client_sys.on(StreamingEvents.Error, lambda client, error: self._on_error(client, error, "Sistema"))
         self.streaming_client_sys.on(StreamingEvents.Termination, lambda client, event: self._on_terminated(client, event, "Sistema"))
 
@@ -1946,7 +1967,7 @@ class TranscriptionApp(ctk.CTk):
                 try:
                     mic_client.stream(audio_data)
                     self._record_audio_buffer(
-                        self.user_name,
+                        "mic",
                         len(audio_data),
                         mic_info[2],
                         captured_at,
@@ -1967,7 +1988,7 @@ class TranscriptionApp(ctk.CTk):
                 try:
                     sys_client.stream(audio_data)
                     self._record_audio_buffer(
-                        self.participants,
+                        "sys",
                         len(audio_data),
                         target_sys_rate,
                         captured_at,
@@ -2119,7 +2140,7 @@ class TranscriptionApp(ctk.CTk):
 
         # Append partials after finalized entries
         for source, (text, ts) in sorted(self.partial_transcripts.items(), key=lambda x: x[1][1]):
-            self.transcript_window.set_partial_line(source, text, ts)
+            self.transcript_window.set_partial_line(source, text, ts, self._speaker(source))
 
     def open_transcript_window(self):
         if self.transcript_window is None or not self.transcript_window.winfo_exists():
@@ -2179,7 +2200,7 @@ class TranscriptionApp(ctk.CTk):
         """Finalize recording by building a local title and renaming files."""
         try:
             if getattr(self, 'current_txt_path', None) and os.path.exists(self.current_txt_path):
-                self.lbl_status.configure(text="● Definindo título...", text_color=C["info"])
+                self.set_status("● Definindo título...", C["info"])
                 title = self._build_recording_title(
                     meeting_title=meeting_title,
                     user_name=user_name,
@@ -2234,7 +2255,7 @@ class TranscriptionApp(ctk.CTk):
                 self.transcript_window.on_close()
                 self.transcript_window = None
 
-            self.lbl_status.configure(text="● Salvo com Sucesso", text_color=C["success"])
+            self.set_status("● Salvo com Sucesso", C["success"])
             os.startfile(folder)
 
         except Exception as e:

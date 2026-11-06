@@ -5,7 +5,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 
-from main import TranscriptWindow, TranscriptionApp, place_window
+from main import TranscriptWindow, TranscriptionApp, place_window, vu_level
 
 
 class FakeTextbox:
@@ -189,35 +189,35 @@ class AudioTimelineTests(unittest.TestCase):
         app = make_timeline_app()
         # A 100 ms buffer that starts at 12:00:20 is delivered at 12:00:20.100.
         delivered_at = datetime.datetime(2026, 1, 1, 12, 0, 20, 100000)
-        app._record_audio_buffer("Outros", 3200, 16000, delivered_at)
+        app._record_audio_buffer("sys", 3200, 16000, delivered_at)
 
         self.assertEqual(
-            app._wall_time_for_audio_offset("Outros", 0),
+            app._wall_time_for_audio_offset("sys", 0),
             datetime.datetime(2026, 1, 1, 12, 0, 20),
         )
         self.assertEqual(
-            app._wall_time_for_audio_offset("Outros", 50),
+            app._wall_time_for_audio_offset("sys", 50),
             datetime.datetime(2026, 1, 1, 12, 0, 20, 50000),
         )
 
     def test_separated_blocks_preserve_wall_clock_gap(self):
         app = make_timeline_app()
         app._record_audio_buffer(
-            "Outros", 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 10, 100000)
+            "sys", 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 10, 100000)
         )
         app._record_audio_buffer(
-            "Outros", 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 30, 100000)
+            "sys", 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 30, 100000)
         )
 
-        self.assertEqual(len(app.audio_wall_segments["Outros"]), 2)
+        self.assertEqual(len(app.audio_wall_segments["sys"]), 2)
         # Offset 100 is both the old segment's end and the new one's start;
         # reverse lookup must choose the newer segment after the real gap.
         self.assertEqual(
-            app._wall_time_for_audio_offset("Outros", 100),
+            app._wall_time_for_audio_offset("sys", 100),
             datetime.datetime(2026, 1, 1, 12, 0, 30),
         )
         self.assertEqual(
-            app._wall_time_for_audio_offset("Outros", 150),
+            app._wall_time_for_audio_offset("sys", 150),
             datetime.datetime(2026, 1, 1, 12, 0, 30, 50000),
         )
 
@@ -227,15 +227,15 @@ class AudioTimelineTests(unittest.TestCase):
         app._reset_audio_timeline(ready=True)
 
         app._record_audio_buffer(
-            "Outros",
+            "sys",
             3200,
             16000,
             datetime.datetime(2026, 1, 1, 12, 0, 20, 100000),
             expected_generation=old_generation,
         )
 
-        self.assertEqual(app.audio_stream_position_ms["Outros"], 0.0)
-        self.assertEqual(app.audio_wall_segments["Outros"], [])
+        self.assertEqual(app.audio_stream_position_ms["sys"], 0.0)
+        self.assertEqual(app.audio_wall_segments["sys"], [])
 
 
 class OrderedHistoryTests(unittest.TestCase):
@@ -284,15 +284,17 @@ class OrderedHistoryTests(unittest.TestCase):
         app.progress_mic = SimpleNamespace(set=lambda _value: None)
         app.progress_sys = SimpleNamespace(set=lambda _value: None)
         app.render_transcript_window = lambda: self.fail("full re-render per line freezes long meetings")
+        app.user_name = "Clarice"
+        app.participants = "Outros"
 
         window = make_transcript_window()
         window.winfo_exists = lambda: True
         app.transcript_window = window
 
         t = lambda s: datetime.datetime(2026, 1, 1, 12, 0, s)
-        app.transcript_queue.put(("PARTIAL", "Outros", "rascunho", t(50)))
+        app.transcript_queue.put(("PARTIAL", "sys", "rascunho", t(50)))
         for s in (10, 30, 20, 40):  # 20 arrives late, must land between 10 and 30
-            app.transcript_queue.put(("TXT", f"[12:00:{s}] Outros: linha {s}", False, t(s), "Outros"))
+            app.transcript_queue.put(("TXT", f"[12:00:{s}] Outros: linha {s}", False, t(s), "sys"))
         app.process_queue()
 
         self.assertEqual(
@@ -301,6 +303,47 @@ class OrderedHistoryTests(unittest.TestCase):
             "[12:00:30] Outros: linha 30\n[12:00:40] Outros: linha 40\n",
         )
         self.assertEqual([e[2] for e in app.transcript_history], [t(10), t(20), t(30), t(40)])
+
+
+class RenameMidMeetingTests(unittest.TestCase):
+    def test_renaming_participants_mid_partial_leaves_no_orphan_lines(self):
+        app = object.__new__(TranscriptionApp)
+        app.transcript_queue = queue.Queue()
+        app.transcript_history = []
+        app.partial_transcripts = {}
+        app.partial_block_until = {}
+        app.last_final_text = {}
+        app.last_partial_update = {}
+        app.render_interval_ms = 0
+        app.after = lambda *_args, **_kwargs: None
+        app.user_name = "Clarice"
+        window = make_transcript_window()
+        window.winfo_exists = lambda: True
+        app.transcript_window = window
+
+        t = datetime.datetime(2026, 1, 1, 12, 0, 0)
+        for name, text in (("K", "Hopefully"), ("Ke", "Hopefully you're"), ("Kevi", "Hopefully you're doing")):
+            app.participants = name  # typed one key at a time in Settings
+            app.transcript_queue.put(("PARTIAL", "sys", text, t))
+            app.process_queue()
+        self.assertEqual(window.textbox.text, "[12:00:00] Kevi: Hopefully you're doing\n")
+
+        app.participants = "Kevin"
+        app.transcript_queue.put(("TXT", "[12:00:00] Kevin: Hopefully you're doing well.", False, t, "sys"))
+        app.process_queue()
+        self.assertEqual(window.textbox.text, "[12:00:00] Kevin: Hopefully you're doing well.\n")
+
+
+class VuLevelTests(unittest.TestCase):
+    def test_meter_tracks_loudness_instead_of_pinning_full(self):
+        import numpy as np
+        tone = lambda amp: (amp * np.sin(np.arange(4096) / 5)).astype(np.int16)
+        self.assertEqual(vu_level(np.zeros(4096, dtype=np.int16)), 0.0)
+        self.assertLess(vu_level(tone(30)), 0.2)      # room noise: near the left
+        speech = vu_level(tone(3000))                  # normal speech: mid bar
+        self.assertTrue(0.4 < speech < 0.9, speech)
+        self.assertEqual(vu_level(tone(32000)), 1.0)   # clipping: full
+        self.assertEqual(vu_level(np.array([], dtype=np.int16)), 0.0)
 
 
 if __name__ == "__main__":
