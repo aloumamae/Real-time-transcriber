@@ -5,7 +5,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 
-from main import TranscriptWindow, TranscriptionApp
+from main import TranscriptWindow, TranscriptionApp, place_window
 
 
 class FakeTextbox:
@@ -49,7 +49,10 @@ class FakeTextbox:
     def index(self, index):
         return str(self._offset(index))
 
-    def insert(self, index, value, _tags=None):
+    def insert(self, index, value, tags=None):
+        self.tagged = getattr(self, "tagged", {})
+        if tags:
+            self.tagged[value] = tags
         position = self._offset(index)
         for mark, mark_position in list(self.marks.items()):
             if mark_position > position or (
@@ -147,6 +150,38 @@ class TranscriptPartialMarkTests(unittest.TestCase):
         self.assertEqual(window.partial_lines, {})
         self.assertNotIn(start_mark, window.textbox.marks)
         self.assertNotIn(end_mark, window.textbox.marks)
+
+
+class PlaceWindowTests(unittest.TestCase):
+    def test_full_hd_at_150_percent_fits_on_screen(self):
+        calls = {}
+        win = SimpleNamespace(
+            _get_window_scaling=lambda: 1.5,
+            winfo_screenwidth=lambda: 1920,
+            winfo_screenheight=lambda: 1080,
+            geometry=lambda g: calls.__setitem__("geometry", g),
+            minsize=lambda w, h: calls.__setitem__("minsize", (w, h)),
+        )
+        place_window(win, 560, 760, min_size=(420, 360))
+
+        size, x, y = re.fullmatch(r"(\d+x\d+)\+(\d+)\+(\d+)", calls["geometry"]).groups()
+        width, height = map(int, size.split("x"))
+        self.assertLessEqual(int(height * 1.5) + int(y), 1080 - 48)  # bottom edge above the taskbar
+        self.assertLessEqual(int(width * 1.5) + int(x), 1920)
+        self.assertGreaterEqual(int(y), 0)
+        self.assertLessEqual(calls["minsize"][1], height)
+
+
+class SpeakerHighlightTests(unittest.TestCase):
+    def test_timestamped_lines_tag_speaker_and_keep_text(self):
+        window = make_transcript_window()
+        window.append_text("[12:00:00] Clarice: oi")
+        window.append_text("[12:00:01] João: tudo bem")
+
+        self.assertEqual(window.textbox.text, "[12:00:00] Clarice: oi\n[12:00:01] João: tudo bem\n")
+        self.assertEqual(window.textbox.tagged["Clarice: "], "user")
+        self.assertEqual(window.textbox.tagged["João: "], "other")
+        self.assertEqual(window.textbox.tagged["[12:00:00] "], "time")
 
 
 class AudioTimelineTests(unittest.TestCase):

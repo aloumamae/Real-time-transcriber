@@ -26,7 +26,10 @@ import numpy as np
 # Config, theme and default Recordings/ live next to main.py, whatever folder the app is launched from.
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-from ui_theme import theme_manager, get_colors, get_radius, get_spacing, apply_theme, add_theme_callback, get_button_colors
+from ui_theme import (
+    theme_manager, apply_theme, add_theme_callback, pick, C, F, FONT, ICON,
+    card, entry, combo, segmented, switch, primary_button, secondary_button, icon_button,
+)
 
 # --- Configurações ---
 CONFIG_FILE = "config.json"
@@ -54,6 +57,23 @@ def apply_window_icon(window):
         window.update_idletasks()
     except Exception:
         pass
+
+def place_window(window, width, height, min_size=None):
+    """Center a window, clamped to the screen. Sizes are logical px.
+
+    CustomTkinter multiplies width/height by the Windows display scale (125%, 150%...)
+    but not x/y, while winfo_screen* reports physical px, so convert both ways.
+    Without this, a 760px window becomes 1140px on a 1080p screen at 150%.
+    """
+    scale = window._get_window_scaling()
+    screen_w, screen_h = window.winfo_screenwidth(), window.winfo_screenheight()
+    width = min(width, int(screen_w / scale) - 40)
+    height = min(height, int(screen_h / scale) - 110)  # taskbar + title bar
+    x = max(0, (screen_w - int(width * scale)) // 2)
+    y = max(0, (screen_h - int(height * scale)) // 2 - int(24 * scale))
+    window.geometry(f"{width}x{height}+{x}+{y}")
+    if min_size:
+        window.minsize(min(min_size[0], width), min(min_size[1], height))
 
 class AudioRecorder:
     def __init__(self):
@@ -211,61 +231,51 @@ class TranscriptWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Voilà | Transcrição em Tempo Real")
-        self.geometry("900x620")
-        self.minsize(720, 480)
-        self.resizable(True, True)
-        # Center window
-        self.update_idletasks()
-        width = self.winfo_width()
-        height = self.winfo_height()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.winfo_screenheight() // 2) - (height // 2)
-        self.geometry(f'{width}x{height}+{x}+{y}')
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.parent_app = parent
+        self.configure(fg_color=C["bg"])
+        place_window(self, 900, 640, min_size=(480, 360))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(250, lambda: apply_window_icon(self))
 
         # Font zoom state
-        self.current_font_size = 12
-        self.default_font_size = 12
+        self.current_font_size = 13
+        self.default_font_size = 13
         self.min_font_size = 10
-        self.max_font_size = 22
-        self.font_family = "Segoe UI"
-
-        colors = get_colors()
-        spacing = get_spacing()
-        radius = get_radius()
+        self.max_font_size = 24
+        self.font_family = FONT
 
         # Track partial lines per speaker
         self.partial_lines = {}
         self.partial_mark_counter = 0
 
-        # Apply theme to window
-        self.configure(fg_color=colors["bg"])
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(14, 10))
+        ctk.CTkLabel(header, text="Transcrição", font=F["title"], text_color=C["text"]).pack(side="left")
+        ctk.CTkLabel(header, text="Ctrl + roda do mouse para zoom", font=F["small"], text_color=C["muted"]).pack(
+            side="left", padx=(12, 0), pady=(4, 0)
+        )
+        icon_button(header, ICON["zoom_in"], self.zoom_in).pack(side="right")
+        icon_button(header, ICON["zoom_out"], self.zoom_out).pack(side="right", padx=(0, 4))
 
-        # Textbox with proper styling
         self.textbox = ctk.CTkTextbox(
             self,
-            fg_color=colors["surface2"],
+            fg_color=C["surface"],
             border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
+            border_color=C["border"],
+            text_color=C["text"],
+            scrollbar_button_color=C["border"],
+            scrollbar_button_hover_color=C["muted"],
             font=(self.font_family, self.current_font_size),
-            corner_radius=radius["card"],
+            corner_radius=14,
+            border_spacing=14,
+            spacing3=8,
             wrap="word"
         )
-        self.textbox.pack(fill="both", expand=True, padx=spacing["padding_external"], pady=spacing["padding_external"])
+        self.textbox.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         self.textbox.configure(state="disabled")
 
-        # Configure text tags for speaker highlighting
-        self.textbox.tag_config("user", foreground=colors["accent"])
-        self.textbox.tag_config("system", foreground=colors["text_secondary"])
-        self.textbox.tag_config("error", foreground=colors["danger"])
-
-        # Bind zoom controls
+        self.on_theme_changed()
         self.bind_zoom_controls()
-
-        # Add theme callback
         add_theme_callback(self.on_theme_changed)
 
     def bind_zoom_controls(self):
@@ -350,7 +360,7 @@ class TranscriptWindow(ctk.CTkToplevel):
             try:
                 start_index = self.textbox.index(start_mark)
                 self.textbox.delete(start_mark, end_mark)
-                self.textbox.insert(start_index, line_text)
+                self.textbox.insert(start_index, line_text, "partial")
                 self.textbox.mark_set(start_mark, start_index)
                 self.textbox.mark_gravity(start_mark, "right")
                 self.textbox.mark_set(end_mark, f"{start_index} + {len(line_text)}c")
@@ -366,7 +376,7 @@ class TranscriptWindow(ctk.CTkToplevel):
 
     def _insert_new_partial_line(self, source, line_text):
         start_index = self.textbox.index("end-1c")
-        self.textbox.insert("end", line_text)
+        self.textbox.insert("end", line_text, "partial")
         self.partial_mark_counter += 1
         start_mark = f"partial_start_{self.partial_mark_counter}"
         end_mark = f"partial_end_{self.partial_mark_counter}"
@@ -407,38 +417,32 @@ class TranscriptWindow(ctk.CTkToplevel):
         """Insert text with speaker highlighting at `index`."""
         # Resolve to a fixed position so the two inserts below land together.
         index = self.textbox.index(index)
-        tag = None
-        if ": " in text:
-            speaker, content = text.split(": ", 1)
-            if speaker.strip() in [self.parent_app.user_name, "Você"]:
-                tag = "user"
-            elif speaker.strip() in ["Sistema", "Outros"]:
-                tag = "system"
-        if tag:
-            self.textbox.insert(index, f"{content}\n")
-            self.textbox.insert(index, f"{speaker}: ", tag)
-        else:
+        stamp, rest = "", text
+        if text.startswith("[") and "] " in text:
+            stamp, rest = text.split("] ", 1)
+            stamp += "] "
+        if ": " not in rest:
             self.textbox.insert(index, text + "\n")
+            return
+        speaker, content = rest.split(": ", 1)
+        name = speaker.strip()
+        if name in (self.parent_app.user_name, "Você"):
+            tag = "user"
+        elif name in ("Sistema", "App", "Microfone"):
+            tag = "system"
+        else:
+            tag = "other"
+        # Same fixed index: each insert lands before the previous one.
+        self.textbox.insert(index, f"{content}\n")
+        self.textbox.insert(index, f"{speaker}: ", tag)
+        if stamp:
+            self.textbox.insert(index, stamp, "time")
 
-    def on_theme_changed(self, theme_name):
-        """Called when theme changes"""
-        colors = theme_manager.get_colors()
-        radius = theme_manager.get_radius()
-
-        # Update window background
-        self.configure(fg_color=colors["bg"])
-
-        # Update textbox
-        self.textbox.configure(
-            fg_color=colors["surface2"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        # Update text tags
-        self.textbox.tag_config("user", foreground=colors["accent"])
-        self.textbox.tag_config("system", foreground=colors["text_secondary"])
-        self.textbox.tag_config("error", foreground=colors["danger"])
+    def on_theme_changed(self, theme_name=None):
+        """Text tags are raw Tk, so they need hex colors for the current mode."""
+        for tag, token in (("user", "accent"), ("other", "info"), ("system", "muted"),
+                           ("time", "muted"), ("partial", "muted"), ("error", "danger")):
+            self.textbox.tag_config(tag, foreground=pick(C[token]))
 
     def on_close(self):
         theme_manager.remove_theme_callback(self.on_theme_changed)
@@ -449,30 +453,15 @@ class SettingsWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Voilà | Configurações")
-        default_width = 760
-        default_height = 860
-        screen_width = self.winfo_screenwidth()
-        screen_height = self.winfo_screenheight()
-        width = min(default_width, max(560, screen_width - 120))
-        height = min(default_height, max(520, screen_height - 120))
-        self.geometry(f"{width}x{height}")
-        self.resizable(True, True)
-        self.minsize(560, 520)
-        # Center window
-        self.update_idletasks()
-        width = self.winfo_width()
-        height = self.winfo_height()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.winfo_screenheight() // 2) - (height // 2)
-        self.geometry(f'{width}x{height}+{x}+{y}')
         self.parent_app = parent
+        self.configure(fg_color=C["bg"])
+        place_window(self, 560, 760, min_size=(420, 360))
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.bind("<FocusIn>", self._on_settings_focus_in)
+        self.after(250, lambda: apply_window_icon(self))
 
-        # Dirty state tracking
         self.original_values = {}
-        self.save_feedback_label = None
         self.output_app_label_to_exe = {}
         self.output_app_exe_to_label = {}
         self.output_apps_poll_job = None
@@ -480,411 +469,139 @@ class SettingsWindow(ctk.CTkToplevel):
         self.output_apps_last_refresh_ts = 0.0
         self.output_apps_poll_interval_ms = 3000
 
-        colors = get_colors()
-        spacing = get_spacing()
-        radius = get_radius()
+        # Footer is packed first so Save/Cancel stay visible however small the window gets.
+        footer = ctk.CTkFrame(self, fg_color=C["surface"], corner_radius=0)
+        footer.pack(side="bottom", fill="x")
+        ctk.CTkFrame(self, height=1, fg_color=C["border"], corner_radius=0).pack(side="bottom", fill="x")
+        footer_row = ctk.CTkFrame(footer, fg_color="transparent")
+        footer_row.pack(fill="x", padx=20, pady=12)
+        self.btn_save = primary_button(footer_row, "Salvar", self.save_settings, width=110, state="disabled")
+        self.btn_save.pack(side="right")
+        secondary_button(footer_row, "Cancelar", self.on_close, width=110).pack(side="right", padx=(0, 8))
+        self.lbl_dirty = ctk.CTkLabel(footer_row, text="", font=F["small"], text_color=C["muted"])
+        self.lbl_dirty.pack(side="left")
 
-        # Apply theme to window
-        self.configure(fg_color=colors["bg"])
-
-        # Keep settings content scrollable while actions remain fixed.
         self.settings_scroll = ctk.CTkScrollableFrame(
-            self,
-            fg_color="transparent",
-            scrollbar_button_color=colors["surface2"],
-            scrollbar_button_hover_color=colors["border"]
+            self, fg_color="transparent",
+            scrollbar_button_color=C["border"], scrollbar_button_hover_color=C["muted"]
         )
-        self.settings_scroll.pack(fill="both", expand=True)
+        self.settings_scroll.pack(fill="both", expand=True, padx=(8, 2))
 
-        # User Name Card
-        frame_name = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
+        ctk.CTkLabel(self.settings_scroll, text="Configurações", font=F["title"], text_color=C["text"]).pack(
+            anchor="w", padx=12, pady=(14, 0)
         )
-        frame_name.pack(pady=(spacing["padding_external"], spacing["gap"]), padx=spacing["padding_external"], fill="x")
 
-        content_name = ctk.CTkFrame(frame_name, fg_color="transparent")
-        content_name.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
+        # --- Próxima reunião (temporary, reset after each recording) ---
+        body = self._section("Próxima reunião", "reseta após cada gravação")
 
-        ctk.CTkLabel(
-            content_name,
-            text="Nome do Usuário:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
+        box = self._field(body, "Título")
+        self.entry_meeting_title = entry(box, placeholder_text="Opcional — ex.: Planejamento semanal")
+        self.entry_meeting_title.pack(fill="x", pady=(6, 0))
+        if self.parent_app.meeting_title:
+            self.entry_meeting_title.insert(0, self.parent_app.meeting_title)
+        self.entry_meeting_title.bind("<KeyRelease>", self.on_value_changed)
 
-        self.entry_name = ctk.CTkEntry(
-            content_name,
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            height=spacing["input_height"],
-            corner_radius=radius["input"]
-        )
-        self.entry_name.pack(pady=(spacing["gap"]/2, 0), fill="x")
-        self.entry_name.insert(0, self.parent_app.user_name)
-        self.entry_name.bind("<KeyRelease>", self.on_value_changed)
-
-        # Participants Card
-        frame_participants = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        frame_participants.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
-
-        content_participants = ctk.CTkFrame(frame_participants, fg_color="transparent")
-        content_participants.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        ctk.CTkLabel(
-            content_participants,
-            text="Participantes da Próxima Reunião:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        self.entry_participants = ctk.CTkEntry(
-            content_participants,
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            height=spacing["input_height"],
-            corner_radius=radius["input"]
-        )
-        self.entry_participants.pack(pady=(spacing["gap"]/2, 0), fill="x")
+        box = self._field(body, "Participantes", "Separados por espaço")
+        self.entry_participants = entry(box)
+        self.entry_participants.pack(fill="x", pady=(6, 0))
         self.entry_participants.insert(0, self.parent_app.participants)
         self.entry_participants.bind("<KeyRelease>", self.on_participants_changed)
 
-        ctk.CTkLabel(
-            content_participants,
-            text="(separados por espaço - reseta após gravação)",
-            text_color=colors["text_secondary"],
-            font=("Arial", 10)
-        ).pack(anchor="w")
+        box = self._field(body, "Idioma")
+        self.combo_language = segmented(box, ["Multilingual", "Inglês"], self.on_language_changed)
+        self.combo_language.pack(fill="x", pady=(6, 0))
+        self.combo_language.set(self.parent_app.language_choice)
 
-        # Meeting title card (temporary for next meeting)
-        frame_meeting_title = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        frame_meeting_title.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
+        # --- Captura ---
+        body = self._section("Captura")
 
-        content_meeting_title = ctk.CTkFrame(frame_meeting_title, fg_color="transparent")
-        content_meeting_title.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        ctk.CTkLabel(
-            content_meeting_title,
-            text="Título da Próxima Reunião:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        self.entry_meeting_title = ctk.CTkEntry(
-            content_meeting_title,
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            height=spacing["input_height"],
-            corner_radius=radius["input"]
-        )
-        self.entry_meeting_title.pack(pady=(spacing["gap"]/2, 0), fill="x")
-        self.entry_meeting_title.insert(0, self.parent_app.meeting_title)
-        self.entry_meeting_title.bind("<KeyRelease>", self.on_value_changed)
-
-        ctk.CTkLabel(
-            content_meeting_title,
-            text='(opcional - se vazio, usa "meeting"; reseta após gravação)',
-            text_color=colors["text_secondary"],
-            font=("Arial", 10)
-        ).pack(anchor="w")
-
-        # Realtime transcript toggle
-        frame_realtime = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        frame_realtime.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
-
-        content_realtime = ctk.CTkFrame(frame_realtime, fg_color="transparent")
-        content_realtime.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        ctk.CTkLabel(
-            content_realtime,
-            text="Transcrição em Tempo Real:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        self.switch_realtime = ctk.CTkSwitch(
-            content_realtime,
-            text="Ativar",
-            command=self.on_realtime_changed
-        )
-        self.switch_realtime.pack(anchor="w", pady=(spacing["gap"]/2, 0))
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", pady=6)
+        self.switch_realtime = switch(row, self.on_realtime_changed)
+        self.switch_realtime.pack(side="right")
+        ctk.CTkLabel(row, text="Transcrição em tempo real", font=F["label"], text_color=C["text"], anchor="w").pack(fill="x")
+        ctk.CTkLabel(row, text="Mostra as falas enquanto ainda estão sendo transcritas", font=F["small"],
+                     text_color=C["muted"], anchor="w").pack(fill="x")
         if self.parent_app.realtime_transcript:
             self.switch_realtime.select()
-        else:
-            self.switch_realtime.deselect()
 
-        # Language selection (temporary for next meeting)
-        frame_language = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
+        box = self._field(body, "Áudio do sistema", "Grave o computador inteiro ou só um aplicativo")
+        self.combo_output_capture_mode = segmented(
+            box, ["Sistema inteiro", "App específico"], self.on_output_capture_mode_changed
         )
-        frame_language.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
+        self.combo_output_capture_mode.pack(fill="x", pady=(6, 0))
+        self.combo_output_capture_mode.set(self.parent_app.sys_capture_mode or "Sistema inteiro")
 
-        content_language = ctk.CTkFrame(frame_language, fg_color="transparent")
-        content_language.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        ctk.CTkLabel(
-            content_language,
-            text="Idioma da Próxima Reunião:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        self.combo_language = ctk.CTkComboBox(
-            content_language,
-            values=["Multilingual", "Inglês"],
-            state="readonly",
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            button_color=colors["surface2"],
-            button_hover_color=colors["border"],
-            dropdown_fg_color=colors["surface"],
-            dropdown_text_color=colors["text_primary"],
-            dropdown_font=("Arial", 12),
-            height=spacing["input_height"],
-            corner_radius=radius["input"],
-            command=self.on_language_changed
-        )
-        self.combo_language.pack(pady=(spacing["gap"]/2, 0), fill="x")
-        self.combo_language.set(self.parent_app.language_choice)
-        self._bind_combo_toggle(self.combo_language)
-        self.after(0, lambda: self._update_combo_menu_width(self.combo_language))
-        self.combo_language.bind("<Configure>", lambda e: self._update_combo_menu_width(self.combo_language))
-
-        ctk.CTkLabel(
-            content_language,
-            text="(reseta após gravação)",
-            text_color=colors["text_secondary"],
-            font=("Arial", 10)
-        ).pack(anchor="w")
-
-        # Output capture mode (advanced)
-        frame_output_capture = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        frame_output_capture.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
-
-        content_output_capture = ctk.CTkFrame(frame_output_capture, fg_color="transparent")
-        content_output_capture.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        ctk.CTkLabel(
-            content_output_capture,
-            text="Captura do Sistema:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        self.combo_output_capture_mode = ctk.CTkComboBox(
-            content_output_capture,
-            values=["Sistema inteiro", "App específico"],
-            state="readonly",
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            button_color=colors["surface2"],
-            button_hover_color=colors["border"],
-            dropdown_fg_color=colors["surface"],
-            dropdown_text_color=colors["text_primary"],
-            dropdown_font=("Arial", 12),
-            height=spacing["input_height"],
-            corner_radius=radius["input"],
-            command=self.on_output_capture_mode_changed
-        )
-        self.combo_output_capture_mode.pack(pady=(spacing["gap"]/2, 0), fill="x")
-        self._bind_combo_toggle(self.combo_output_capture_mode)
-        self.after(0, lambda: self._update_combo_menu_width(self.combo_output_capture_mode))
-        self.combo_output_capture_mode.bind("<Configure>", lambda e: self._update_combo_menu_width(self.combo_output_capture_mode))
-        self.combo_output_capture_mode.set("Sistema inteiro")
-
-        app_row = ctk.CTkFrame(content_output_capture, fg_color="transparent")
-        app_row.pack(pady=(spacing["gap"]/2, 0), fill="x")
-
-        self.combo_output_app = ctk.CTkComboBox(
-            app_row,
-            values=["Selecione um app"],
-            state="readonly",
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            button_color=colors["surface2"],
-            button_hover_color=colors["border"],
-            dropdown_fg_color=colors["surface"],
-            dropdown_text_color=colors["text_primary"],
-            dropdown_font=("Arial", 12),
-            height=spacing["input_height"],
-            corner_radius=radius["input"],
-            command=self.on_output_app_changed
-        )
-        self.combo_output_app.pack(side="left", fill="x", expand=True)
+        self.app_row = ctk.CTkFrame(box, fg_color="transparent")
+        self.combo_output_app = combo(self.app_row, values=["Selecione um app"], command=self.on_output_app_changed)
+        self.combo_output_app.pack(fill="x")
         self._bind_combo_toggle(self.combo_output_app)
         self.after(0, lambda: self._update_combo_menu_width(self.combo_output_app))
         self.combo_output_app.bind("<Configure>", lambda e: self._update_combo_menu_width(self.combo_output_app))
 
-        self.lbl_output_capture_status = ctk.CTkLabel(
-            content_output_capture,
-            text="",
-            text_color=colors["text_secondary"],
-            font=("Arial", 10)
-        )
-        self.lbl_output_capture_status.pack(anchor="w")
+        self.lbl_output_capture_status = ctk.CTkLabel(box, text="", font=F["small"], text_color=C["muted"], anchor="w", height=0)
+        self.lbl_output_capture_status.pack(fill="x")
 
-        # Save directory card
-        frame_save_dir = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        frame_save_dir.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
+        # --- Geral (persistent) ---
+        body = self._section("Geral")
 
-        content_save_dir = ctk.CTkFrame(frame_save_dir, fg_color="transparent")
-        content_save_dir.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
+        box = self._field(body, "Seu nome", "Como você aparece na transcrição")
+        self.entry_name = entry(box)
+        self.entry_name.pack(fill="x", pady=(6, 0))
+        self.entry_name.insert(0, self.parent_app.user_name)
+        self.entry_name.bind("<KeyRelease>", self.on_value_changed)
 
-        ctk.CTkLabel(
-            content_save_dir,
-            text="Pasta de Salvamento:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        row_dir = ctk.CTkFrame(content_save_dir, fg_color="transparent")
-        row_dir.pack(pady=(spacing["gap"]/2, 0), fill="x")
-
-        self.entry_save_dir = ctk.CTkEntry(
-            row_dir,
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            height=spacing["input_height"],
-            corner_radius=radius["input"]
-        )
-        self.entry_save_dir.pack(side="left", fill="x", expand=True, padx=(0, spacing["gap"]/2))
+        box = self._field(body, "Pasta das transcrições")
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 0))
+        self.btn_browse_dir = secondary_button(row, "Procurar", self.browse_save_directory, width=96, height=36)
+        self.btn_browse_dir.pack(side="right", padx=(8, 0))
+        self.entry_save_dir = entry(row)
+        self.entry_save_dir.pack(fill="x")
         self.entry_save_dir.insert(0, self.parent_app.save_directory)
         self.entry_save_dir.bind("<KeyRelease>", self.on_save_dir_changed)
 
-        self.btn_browse_dir = ctk.CTkButton(
-            row_dir,
-            text="Selecionar",
-            width=120,
-            height=spacing["input_height"],
-            corner_radius=radius["input"],
-            command=self.browse_save_directory
-        )
-        self.btn_browse_dir.pack(side="right")
-
-        ctk.CTkLabel(
-            content_save_dir,
-            text="(será mantida para as próximas reuniões)",
-            text_color=colors["text_secondary"],
-            font=("Arial", 10)
-        ).pack(anchor="w")
-
-        # AssemblyAI API Key Card
-        frame_api = ctk.CTkFrame(
-            self.settings_scroll,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        frame_api.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
-
-        content_api = ctk.CTkFrame(frame_api, fg_color="transparent")
-        content_api.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        ctk.CTkLabel(
-            content_api,
-            text="AssemblyAI API Key:",
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(anchor="w")
-
-        self.entry_api = ctk.CTkEntry(
-            content_api,
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            text_color=colors["text_primary"],
-            height=spacing["input_height"],
-            corner_radius=radius["input"],
-            show="*"
-        )
-        self.entry_api.pack(pady=(spacing["gap"]/2, 0), fill="x")
+        box = self._field(body, "Chave da API AssemblyAI", "Cada pessoa usa a própria chave (assemblyai.com)")
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", pady=(6, 0))
+        icon_button(row, ICON["eye"], self._toggle_api_visibility).pack(side="right", padx=(8, 0))
+        self.entry_api = entry(row, show="•")
+        self.entry_api.pack(fill="x")
         self.entry_api.insert(0, self.parent_app.api_key)
         self.entry_api.bind("<KeyRelease>", self.on_value_changed)
 
-        # Save Button
-        frame_btn = ctk.CTkFrame(self, fg_color="transparent")
-        frame_btn.pack(pady=(spacing["gap"], spacing["padding_external"]), padx=spacing["padding_external"], fill="x")
+        ctk.CTkFrame(self.settings_scroll, height=16, fg_color="transparent").pack()
 
-        self.btn_save = ctk.CTkButton(
-            frame_btn,
-            text="Salvar Configurações",
-            fg_color=colors["bg"],  # Background color when disabled (ghost style)
-            border_width=2,  # Visible border when disabled
-            border_color="white",  # White border to indicate inactive state
-            text_color=colors["text_primary"],  # Readable text color
-            height=spacing["button_primary_height"],
-            corner_radius=radius["button"],
-            font=("Arial", 14, "bold"),
-            command=self.save_settings,
-            state="disabled"  # Start disabled
-        )
-        self.btn_save.pack(fill="x")
-
-        # Initialize output capture controls from app state.
-        self.combo_output_capture_mode.set(self.parent_app.sys_capture_mode or "Sistema inteiro")
         self._set_output_capture_controls_state()
         if self.combo_output_capture_mode.get().strip() == "App específico":
             self.refresh_output_apps_async()
             self._start_output_apps_auto_refresh()
 
-        # Store original values and initialize dirty state
         self.store_original_values()
-
-        # Add theme callback
-        add_theme_callback(self.on_theme_changed)
         self.after(0, self.bring_to_front)
+
+    def _section(self, title, note=None):
+        head = ctk.CTkFrame(self.settings_scroll, fg_color="transparent")
+        head.pack(fill="x", padx=14, pady=(18, 6))
+        ctk.CTkLabel(head, text=title, font=F["h"], text_color=C["text"]).pack(side="left")
+        if note:
+            ctk.CTkLabel(head, text=note, font=F["small"], text_color=C["muted"]).pack(side="right")
+        frame = card(self.settings_scroll)
+        frame.pack(fill="x", padx=12)
+        body = ctk.CTkFrame(frame, fg_color="transparent")
+        body.pack(fill="x", padx=16, pady=10)
+        return body
+
+    def _field(self, body, label, hint=None):
+        box = ctk.CTkFrame(body, fg_color="transparent")
+        box.pack(fill="x", pady=6)
+        ctk.CTkLabel(box, text=label, font=F["label"], text_color=C["text"], anchor="w").pack(fill="x")
+        if hint:
+            ctk.CTkLabel(box, text=hint, font=F["small"], text_color=C["muted"], anchor="w").pack(fill="x")
+        return box
+
+    def _toggle_api_visibility(self):
+        self.entry_api.configure(show="" if self.entry_api.cget("show") else "•")
 
     def bring_to_front(self):
         try:
@@ -896,9 +613,8 @@ class SettingsWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def store_original_values(self):
-        """Store the original values when window opens"""
-        self.original_values = {
+    def _current_values(self):
+        return {
             "user_name": self.entry_name.get().strip(),
             "api_key": self.entry_api.get().strip(),
             "participants": self.entry_participants.get().strip() or "Outros",
@@ -909,6 +625,10 @@ class SettingsWindow(ctk.CTkToplevel):
             "sys_capture_mode": self.combo_output_capture_mode.get().strip(),
             "sys_app_target": self._get_selected_output_app_exe()
         }
+
+    def store_original_values(self):
+        """Store the original values when window opens"""
+        self.original_values = self._current_values()
         self.check_dirty_state()
 
     def _format_app_display_name(self, exe_name):
@@ -1022,6 +742,10 @@ class SettingsWindow(ctk.CTkToplevel):
     def _set_output_capture_controls_state(self):
         app_mode = self.combo_output_capture_mode.get().strip() == "App específico"
         self.combo_output_app.configure(state="readonly" if app_mode else "disabled")
+        if app_mode:
+            self.app_row.pack(fill="x", pady=(8, 0), before=self.lbl_output_capture_status)
+        else:
+            self.app_row.pack_forget()
         if app_mode:
             if self.combo_output_app.get().strip() in ("", "Selecione um app"):
                 self.lbl_output_capture_status.configure(text="Selecione o aplicativo alvo.")
@@ -1142,56 +866,13 @@ class SettingsWindow(ctk.CTkToplevel):
             self.check_dirty_state()
 
     def check_dirty_state(self):
-        """Check if current values differ from original"""
-        current_values = {
-            "user_name": self.entry_name.get().strip(),
-            "api_key": self.entry_api.get().strip(),
-            "participants": self.entry_participants.get().strip() or "Outros",
-            "meeting_title": self.entry_meeting_title.get().strip(),
-            "realtime_transcript": bool(self.switch_realtime.get()),
-            "language_choice": self.combo_language.get().strip(),
-            "save_directory": self.entry_save_dir.get().strip(),
-            "sys_capture_mode": self.combo_output_capture_mode.get().strip(),
-            "sys_app_target": self._get_selected_output_app_exe()
-        }
-
-        # Check if any value changed
-        has_changes = current_values != self.original_values
-
-        # Update button state and appearance
-        colors = get_colors()
-        if has_changes:
-            # Enable button with normal appearance (blue)
-            self.btn_save.configure(
-                state="normal",
-                fg_color=colors["accent"],
-                border_width=0,  # No border when active
-                text_color="white"
-            )
-        else:
-            # Disable button with ghost appearance (background color + white border)
-            self.btn_save.configure(
-                state="disabled",
-                fg_color=colors["bg"],  # Same as app background
-                border_width=2,  # Visible border
-                border_color="white",  # White border indicates inactive
-                text_color=colors["text_primary"]  # Readable text
-            )
+        """Enable Save only when something differs from what the window opened with."""
+        dirty = self._current_values() != self.original_values
+        self.btn_save.configure(state="normal" if dirty else "disabled", fg_color=C["accent"] if dirty else C["field"])
+        self.lbl_dirty.configure(text="Alterações não salvas" if dirty else "")
 
     def save_settings(self):
-        # Only save if there are changes
-        current_values = {
-            "user_name": self.entry_name.get().strip(),
-            "api_key": self.entry_api.get().strip(),
-            "participants": self.entry_participants.get().strip() or "Outros",
-            "meeting_title": self.entry_meeting_title.get().strip(),
-            "realtime_transcript": bool(self.switch_realtime.get()),
-            "language_choice": self.combo_language.get().strip(),
-            "save_directory": self.entry_save_dir.get().strip(),
-            "sys_capture_mode": self.combo_output_capture_mode.get().strip(),
-            "sys_app_target": self._get_selected_output_app_exe()
-        }
-
+        current_values = self._current_values()
         if current_values == self.original_values:
             return  # No changes to save
 
@@ -1229,210 +910,17 @@ class SettingsWindow(ctk.CTkToplevel):
         self.parent_app.sys_capture_mode = current_values["sys_capture_mode"]
         self.parent_app.sys_app_target = current_values["sys_app_target"]
 
-        # Update original values
-        self.original_values = current_values.copy()
-
-        # Update button appearance to inactive state
-        colors = get_colors()
-        self.btn_save.configure(
-            state="disabled",
-            fg_color=colors["bg"],  # Same as app background
-            border_width=2,  # Visible border
-            border_color="white",  # White border indicates inactive
-            text_color=colors["text_primary"]  # Readable text
-        )
-
-        # Show inline feedback
-        self.show_save_feedback()
-        # Close settings after save
+        self.original_values = current_values
         self.on_close()
-
-    def show_save_feedback(self):
-        """Show temporary feedback that settings were saved"""
-        colors = get_colors()
-
-        # Remove existing feedback if present
-        if self.save_feedback_label:
-            self.save_feedback_label.destroy()
-
-        # Place feedback inside the button frame to avoid shifting layout
-        self.save_feedback_label = ctk.CTkLabel(
-            self.btn_save.master,
-            text="✓ Configurações salvas",
-            text_color=colors["success"],
-            font=("Arial", 12, "bold")
-        )
-
-        self.save_feedback_label.pack(pady=(0, 5))
-
-        # Auto-hide after 2.5 seconds
-        self.after(2500, self.hide_save_feedback)
-
-    def hide_save_feedback(self):
-        """Hide the save feedback label"""
-        if self.save_feedback_label:
-            self.save_feedback_label.destroy()
-            self.save_feedback_label = None
-
-    def on_theme_changed(self, theme_name):
-        """Called when theme changes"""
-        colors = theme_manager.get_colors()
-        spacing = theme_manager.get_spacing()
-        radius = theme_manager.get_radius()
-
-        # Update window background
-        self.configure(fg_color=colors["bg"])
-
-        if hasattr(self, "settings_scroll"):
-            self.settings_scroll.configure(
-                fg_color="transparent",
-                scrollbar_button_color=colors["surface2"],
-                scrollbar_button_hover_color=colors["border"]
-            )
-
-        # Update all card containers recursively.
-        def update_cards(widget):
-            if isinstance(widget, ctk.CTkFrame) and hasattr(widget, "cget"):
-                try:
-                    if widget.cget("border_width") > 0:
-                        widget.configure(
-                            fg_color=colors["surface"],
-                            border_color=colors["border"]
-                        )
-                except Exception:
-                    pass
-            for child in widget.winfo_children():
-                update_cards(child)
-
-        update_cards(self)
-
-        # Update entries
-        self.entry_name.configure(
-            fg_color=colors["surface2"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        self.entry_api.configure(
-            fg_color=colors["surface2"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        self.entry_meeting_title.configure(
-            fg_color=colors["surface2"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        self.entry_participants.configure(
-            fg_color=colors["surface2"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        if hasattr(self, "entry_save_dir"):
-            self.entry_save_dir.configure(
-                fg_color=colors["surface2"],
-                border_color=colors["border"],
-                text_color=colors["text_primary"]
-            )
-        if hasattr(self, "btn_browse_dir"):
-            self.btn_browse_dir.configure(
-                fg_color=colors["surface2"],
-                hover_color=colors["border"],
-                text_color=colors["text_primary"]
-            )
-
-        if hasattr(self, "switch_realtime"):
-            self.switch_realtime.configure(
-                fg_color=colors["accent"],
-                progress_color=colors["surface"],
-                text_color=colors["text_primary"]
-            )
-
-        if hasattr(self, "combo_language"):
-            self.combo_language.configure(
-                fg_color=colors["surface2"],
-                border_color=colors["border"],
-                button_color=colors["surface2"],
-                button_hover_color=colors["border"],
-                dropdown_fg_color=colors["surface"],
-                dropdown_text_color=colors["text_primary"],
-                text_color=colors["text_primary"]
-            )
-            self.after(0, lambda: self._update_combo_menu_width(self.combo_language))
-
-        if hasattr(self, "combo_output_capture_mode"):
-            self.combo_output_capture_mode.configure(
-                fg_color=colors["surface2"],
-                border_color=colors["border"],
-                button_color=colors["surface2"],
-                button_hover_color=colors["border"],
-                dropdown_fg_color=colors["surface"],
-                dropdown_text_color=colors["text_primary"],
-                text_color=colors["text_primary"]
-            )
-            self.after(0, lambda: self._update_combo_menu_width(self.combo_output_capture_mode))
-
-        if hasattr(self, "combo_output_app"):
-            self.combo_output_app.configure(
-                fg_color=colors["surface2"],
-                border_color=colors["border"],
-                button_color=colors["surface2"],
-                button_hover_color=colors["border"],
-                dropdown_fg_color=colors["surface"],
-                dropdown_text_color=colors["text_primary"],
-                text_color=colors["text_primary"]
-            )
-            self.after(0, lambda: self._update_combo_menu_width(self.combo_output_app))
-
-        # Update button - respect current state
-        if self.btn_save.cget("state") == "normal":
-            # Button is enabled (blue)
-            self.btn_save.configure(
-                fg_color=colors["accent"],
-                border_width=0,
-                text_color="white"
-            )
-        else:
-            # Button is disabled (ghost style)
-            self.btn_save.configure(
-                fg_color=colors["bg"],  # Same as app background
-                border_width=2,  # Visible border
-                border_color="white",  # White border indicates inactive
-                text_color=colors["text_primary"]  # Readable text
-            )
-
-        # Update all labels
-        def update_labels(widget):
-            if isinstance(widget, ctk.CTkLabel):
-                widget.configure(text_color=colors["text_primary"])
-            for child in widget.winfo_children():
-                update_labels(child)
-
-        update_labels(self)
 
     def on_close(self):
         if self.check_dirty_state_and_confirm_close():
             self._stop_output_apps_auto_refresh()
-            theme_manager.remove_theme_callback(self.on_theme_changed)
             self.parent_app.settings_window = None
             self.destroy()
 
     def check_dirty_state_and_confirm_close(self):
-        current_values = {
-            "user_name": self.entry_name.get().strip(),
-            "api_key": self.entry_api.get().strip(),
-            "participants": self.entry_participants.get().strip() or "Outros",
-            "meeting_title": self.entry_meeting_title.get().strip(),
-            "realtime_transcript": bool(self.switch_realtime.get()),
-            "language_choice": self.combo_language.get().strip(),
-            "save_directory": self.entry_save_dir.get().strip(),
-            "sys_capture_mode": self.combo_output_capture_mode.get().strip(),
-            "sys_app_target": self._get_selected_output_app_exe()
-        }
-        if current_values != self.original_values:
+        if self._current_values() != self.original_values:
             return messagebox.askyesno(
                 "Alterações não salvas",
                 "Há alterações não salvas. Fechar sem salvar?",
@@ -1445,9 +933,6 @@ class TranscriptionApp(ctk.CTk):
         super().__init__()
         self.title("Voilà | Never lose the thread")
         self.after(0, lambda: apply_window_icon(self))
-        # Temporary geometry - will be adjusted after UI setup
-        self.geometry("420x100")
-        self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.recorder = AudioRecorder()
@@ -1501,18 +986,8 @@ class TranscriptionApp(ctk.CTk):
         self.load_config()
         self.setup_ui()
         self.populate_devices()
-        self.apply_theme_to_widgets()
-
-        # Force initial layout update
-        self.update_idletasks()
-
+        self._fit_to_content()
         self.after(50, self.process_queue)
-
-        # Adjust window size after a longer delay to ensure all widgets are fully rendered
-        self.after(150, self.adjust_window_size)
-
-        # Add theme callback to update UI when theme changes
-        add_theme_callback(self.on_theme_changed)
 
     def _run_hidden_command(self, cmd, timeout_sec=4):
         creationflags = 0
@@ -1539,340 +1014,108 @@ class TranscriptionApp(ctk.CTk):
             return ""
 
     def setup_ui(self):
-        # Theme toggle in top right
-        colors = get_colors()
-        spacing = get_spacing()
+        pad = 20
+        self.configure(fg_color=C["bg"])
 
-        frame_top = ctk.CTkFrame(self, fg_color="transparent")
-        frame_top.pack(fill="x", padx=spacing["padding_external"], pady=(spacing["padding_external"], spacing["gap"]))
-
-        # Theme toggle switch (discreet)
-        self.theme_switch = ctk.CTkSwitch(
-            frame_top,
-            text="",
-            width=40,
-            height=20,
-            command=self.toggle_theme
-        )
-        self.theme_switch.pack(side="right")
-        # Set initial state based on current theme
-        self.theme_switch.select() if theme_manager.current_theme == "dark" else self.theme_switch.deselect()
-
-        # Device sections as cards
-        self.create_device_section("Microfone:", "mic")
-        self.create_device_section("Sistema:", "sys")
-        if hasattr(self, "switch_mic_enabled"):
-            self.switch_mic_enabled.select() if self.mic_enabled else self.switch_mic_enabled.deselect()
-        if hasattr(self, "switch_sys_enabled"):
-            self.switch_sys_enabled.select() if self.sys_enabled else self.switch_sys_enabled.deselect()
-
-        # Record button and discreet settings button in the same frame
-        frame_record = ctk.CTkFrame(self, fg_color="transparent")
-        frame_record.pack(pady=(spacing["gap"], spacing["gap"]), padx=spacing["padding_external"], fill="x")
-
-        spacing = get_spacing()
-        button_colors = get_button_colors("success")
-        self.btn_record = ctk.CTkButton(
-            frame_record,
-            text="INICIAR GRAVAÇÃO",
-            fg_color=button_colors["fg_color"],
-            hover_color=button_colors["hover_color"],
-            height=spacing["button_primary_height"],
-            corner_radius=get_radius()["button"],
-            font=("Arial", 14, "bold"),
-            command=self.toggle_recording
-        )
-        self.btn_record.pack(side="left", fill="x", expand=True, padx=(0, spacing["gap"]))
-
-        # Discreet settings button - ghost style
-        self.btn_settings = ctk.CTkButton(
-            frame_record,
-            text="⚙️",
-            width=spacing["button_primary_height"],
-            height=spacing["button_primary_height"],
-            fg_color="transparent",
-            border_width=1,
-            corner_radius=get_radius()["button"],
-            command=self.open_settings_window
-        )
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=pad, pady=(16, 14))
+        ctk.CTkLabel(header, text=ICON["mic"], font=("Segoe MDL2 Assets", 22), text_color=C["accent"]).pack(side="left")
+        brand = ctk.CTkFrame(header, fg_color="transparent")
+        brand.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(brand, text="Voilà", font=F["title"], text_color=C["text"], height=24).pack(anchor="w")
+        ctk.CTkLabel(brand, text="Never lose the thread", font=F["small"], text_color=C["muted"], height=16).pack(anchor="w")
+        self.btn_settings = icon_button(header, ICON["settings"], self.open_settings_window)
         self.btn_settings.pack(side="right")
+        self.btn_theme = icon_button(header, self._theme_glyph(), self.toggle_theme)
+        self.btn_theme.pack(side="right", padx=(0, 4))
 
-        # Secondary buttons
-        frame_btns = ctk.CTkFrame(self, fg_color="transparent")
-        frame_btns.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
+        # Status bar is packed before the body so it stays pinned to the bottom edge.
+        status_bar = ctk.CTkFrame(self, fg_color="transparent")
+        status_bar.pack(side="bottom", fill="x", padx=pad, pady=(0, 12))
+        self.lbl_status = ctk.CTkLabel(status_bar, text="● Pronto", font=F["small"], text_color=C["muted"])
+        self.lbl_status.pack(side="left")
+        self.lbl_timer = ctk.CTkLabel(status_bar, text="", font=("Segoe UI Semibold", 12), text_color=C["text"])
+        self.lbl_timer.pack(side="right")
 
-        colors = get_colors()
-        spacing = get_spacing()
-        self.btn_transcript = ctk.CTkButton(
-            frame_btns,
-            text="Ver Transcrição",
-            fg_color="transparent",
-            border_width=1,
-            height=spacing["button_secondary_height"],
-            corner_radius=get_radius()["button"],
-            command=self.open_transcript_window
+        self.create_device_section("Microfone", "mic")
+        self.create_device_section("Áudio do sistema", "sys")
+        if self.mic_enabled:
+            self.switch_mic_enabled.select()
+        if self.sys_enabled:
+            self.switch_sys_enabled.select()
+
+        self.btn_record = ctk.CTkButton(
+            self, font=F["big"], height=52, corner_radius=12, text_color="#FFFFFF", command=self.toggle_recording
         )
-        self.btn_transcript.pack(fill="x", pady=(0, spacing["gap"]/2))
+        self.btn_record.pack(fill="x", padx=pad, pady=(6, 10))
+        self._set_record_button(False)
 
-        self.btn_folder = ctk.CTkButton(
-            frame_btns,
-            text="Abrir Pasta",
-            fg_color="transparent",
-            border_width=1,
-            height=spacing["button_secondary_height"],
-            corner_radius=get_radius()["button"],
-            command=self.open_folder
-        )
-        self.btn_folder.pack(fill="x")
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=pad, pady=(0, 14))
+        row.grid_columnconfigure((0, 1), weight=1, uniform="actions")
+        self.btn_transcript = secondary_button(row, "Ver transcrição", self.open_transcript_window)
+        self.btn_transcript.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+        self.btn_folder = secondary_button(row, "Abrir pasta", self.open_folder)
+        self.btn_folder.grid(row=0, column=1, sticky="ew", padx=(5, 0))
 
-        # Status badge at bottom - minimal spacing
-        self.lbl_status = ctk.CTkLabel(self, text="● Pronto", font=("Arial", 11))
-        self.lbl_status.pack(pady=(0, spacing["gap"]))
-
-    def adjust_window_size(self):
-        """Adjust window size to fit content automatically"""
-        fixed_width = 480  # Increased width to accommodate longer device names
-        # Fixed height based on layout analysis - ensures all content fits
-        fixed_height = 760  # Height based on content analysis (747px content + 13px padding)
-
-        # Calculate centered position
-        screen_width = self.winfo_screenwidth()
-        screen_height = self.winfo_screenheight()
-        x = (screen_width // 2) - (fixed_width // 2)
-        y = (screen_height // 2) - (fixed_height // 2)
-
-        # Ensure window stays on screen
-        x = max(0, min(x, screen_width - fixed_width))
-        y = max(0, min(y, screen_height - fixed_height))
-
-        # Apply geometry
-        self.geometry(f'{fixed_width}x{fixed_height}+{x}+{y}')
-
-        # Force layout update to ensure proper rendering
+    def _fit_to_content(self):
+        """Size the window to its content (in logical px) and center it on screen."""
         self.update_idletasks()
+        height = int(self.winfo_reqheight() / self._get_window_scaling())
+        place_window(self, 440, height, min_size=(380, height))
 
-        # Set minimum size to prevent shrinking below content size
-        self.minsize(fixed_width, fixed_height)
+    def _set_record_button(self, recording):
+        if recording:
+            self.btn_record.configure(text="■   Parar gravação", fg_color=C["danger"], hover_color=C["danger_hover"])
+        else:
+            self.btn_record.configure(text="●   Iniciar gravação", fg_color=C["accent"], hover_color=C["accent_hover"])
 
-        # Debug logging (can be removed in production)
-        # print(f"Window adjusted to {fixed_width}x{fixed_height} at position {x},{y}")
+    def _tick_timer(self):
+        start = self.recorder.start_time
+        if not self.is_recording or not start:
+            self.lbl_timer.configure(text="")
+            return
+        secs = int((datetime.datetime.now() - start).total_seconds())
+        self.lbl_timer.configure(text=f"{secs // 3600:02d}:{secs % 3600 // 60:02d}:{secs % 60:02d}")
+        self.after(1000, self._tick_timer)
 
     def create_device_section(self, label, type_key):
-        colors = get_colors()
-        spacing = get_spacing()
-        radius = get_radius()
+        frame = card(self)
+        frame.pack(fill="x", padx=20, pady=(0, 10))
 
-        # Card frame
-        card = ctk.CTkFrame(
-            self,
-            fg_color=colors["surface"],
-            border_width=1,
-            border_color=colors["border"],
-            corner_radius=radius["card"]
-        )
-        card.pack(pady=(0, spacing["gap"]), padx=spacing["padding_external"], fill="x")
-
-        # Card content with padding
-        content_frame = ctk.CTkFrame(card, fg_color="transparent")
-        content_frame.pack(padx=spacing["padding_card"], pady=spacing["padding_card"], fill="x")
-
-        # Header (label + enable switch)
-        header_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
-        header_frame.pack(fill="x")
-
-        ctk.CTkLabel(
-            header_frame,
-            text=label,
-            text_color=colors["text_primary"],
-            font=("Arial", 12, "bold")
-        ).pack(side="left")
-
-        source_switch = ctk.CTkSwitch(
-            header_frame,
-            text="Ativo",
-            width=70,
-            command=lambda t=type_key: self.on_source_enabled_changed(t)
-        )
+        head = ctk.CTkFrame(frame, fg_color="transparent")
+        head.pack(fill="x", padx=16, pady=(12, 8))
+        glyph = ICON["mic"] if type_key == "mic" else ICON["speaker"]
+        ctk.CTkLabel(head, text=glyph, font=F["icon"], text_color=C["muted"], width=20).pack(side="left")
+        ctk.CTkLabel(head, text=label, font=F["h"], text_color=C["text"]).pack(side="left", padx=(8, 0))
+        source_switch = switch(head, lambda t=type_key: self.on_source_enabled_changed(t))
         source_switch.pack(side="right")
-        source_switch.select()
 
-        # ComboBox
-        combo = ctk.CTkComboBox(
-            content_frame,
-            fg_color=colors["surface2"],
-            border_width=1,
-            border_color=colors["border"],
-            button_color=colors["surface2"],
-            button_hover_color=colors["border"],
-            dropdown_fg_color=colors["surface"],
-            dropdown_text_color=colors["text_primary"],
-            text_color=colors["text_primary"],
-            height=spacing["input_height"],
-            corner_radius=radius["input"],
-            command=lambda value, t=type_key: self.on_device_selected(t, value)
-        )
-        combo.pack(pady=(spacing["gap"]/2, 0), fill="x")
-        self._bind_combo_refresh(combo)
-        try:
-            combo.configure(state="readonly")
-        except Exception:
-            try:
-                combo._entry.configure(state="readonly")
-            except Exception:
-                pass
+        device_combo = combo(frame, command=lambda value, t=type_key: self.on_device_selected(t, value))
+        device_combo.pack(fill="x", padx=16)
+        self._bind_combo_refresh(device_combo)
 
-        # Progress bar (thin style)
         progress = ctk.CTkProgressBar(
-            content_frame,
-            height=spacing["progress_height"],
-            fg_color=colors["surface2"],
-            progress_color=colors["accent"],
-            corner_radius=spacing["progress_height"]/2  # Pill shape
+            frame, height=6, corner_radius=3, fg_color=C["field"], progress_color=C["success"]
         )
         progress.set(0)
-        progress.pack(pady=(spacing["gap"]/2, 0), fill="x")
+        progress.pack(fill="x", padx=16, pady=(12, 16))
 
         if type_key == "mic":
-            self.combo_mic = combo
+            self.combo_mic = device_combo
             self.progress_mic = progress
             self.switch_mic_enabled = source_switch
         else:
-            self.combo_sys = combo
+            self.combo_sys = device_combo
             self.progress_sys = progress
             self.switch_sys_enabled = source_switch
 
+    def _theme_glyph(self):
+        return ICON["sun"] if theme_manager.current_theme == "dark" else ICON["moon"]
+
     def toggle_theme(self):
-        """Toggle between dark and light theme"""
-        new_theme = "light" if theme_manager.current_theme == "dark" else "dark"
-        apply_theme(new_theme)
-        # Update switch state
-        self.theme_switch.select() if new_theme == "dark" else self.theme_switch.deselect()
-
-    def on_theme_changed(self, theme_name):
-        """Called when theme changes externally"""
-        self.apply_theme_to_widgets()
-        # Update switch state
-        self.theme_switch.select() if theme_name == "dark" else self.theme_switch.deselect()
-
-    def apply_theme_to_widgets(self):
-        """Apply current theme to all widgets"""
-        colors = get_colors()
-        spacing = get_spacing()
-        radius = get_radius()
-
-        # Update window background
-        self.configure(fg_color=colors["bg"])
-
-        # Update theme switch colors
-        self.theme_switch.configure(
-            fg_color=colors["accent"],
-            progress_color=colors["surface"]
-        )
-
-        # Update device section cards
-        for widget in self.winfo_children():
-            if isinstance(widget, ctk.CTkFrame) and hasattr(widget, 'cget'):
-                # Check if it's a card (has border)
-                try:
-                    if widget.cget("border_width") > 0:
-                        widget.configure(
-                            fg_color=colors["surface"],
-                            border_color=colors["border"]
-                        )
-                except:
-                    pass
-
-        # Update combo boxes
-        if hasattr(self, 'combo_mic'):
-            self.combo_mic.configure(
-                fg_color=colors["surface2"],
-                border_color=colors["border"],
-                button_color=colors["surface2"],
-                button_hover_color=colors["border"],
-                dropdown_fg_color=colors["surface"],
-                dropdown_text_color=colors["text_primary"],
-                text_color=colors["text_primary"]
-            )
-
-        if hasattr(self, 'combo_sys'):
-            self.combo_sys.configure(
-                fg_color=colors["surface2"],
-                border_color=colors["border"],
-                button_color=colors["surface2"],
-                button_hover_color=colors["border"],
-                dropdown_fg_color=colors["surface"],
-                dropdown_text_color=colors["text_primary"],
-                text_color=colors["text_primary"]
-            )
-
-        if hasattr(self, 'switch_mic_enabled'):
-            self.switch_mic_enabled.configure(
-                text_color=colors["text_primary"],
-                progress_color=colors["accent"]
-            )
-
-        if hasattr(self, 'switch_sys_enabled'):
-            self.switch_sys_enabled.configure(
-                text_color=colors["text_primary"],
-                progress_color=colors["accent"]
-            )
-
-        # Update progress bars
-        if hasattr(self, 'progress_mic'):
-            self.progress_mic.configure(
-                fg_color=colors["surface2"],
-                progress_color=colors["accent"]
-            )
-
-        if hasattr(self, 'progress_sys'):
-            self.progress_sys.configure(
-                fg_color=colors["surface2"],
-                progress_color=colors["accent"]
-            )
-
-        # Update buttons - maintain correct colors based on recording state
-        if self.is_recording:
-            button_colors = get_button_colors("danger")
-        else:
-            button_colors = get_button_colors("success")
-        self.btn_record.configure(
-            fg_color=button_colors["fg_color"],
-            hover_color=button_colors["hover_color"]
-        )
-
-        # Update settings button (ghost style)
-        secondary_colors = get_button_colors("secondary")
-        self.btn_settings.configure(
-            fg_color="transparent",
-            hover_color=secondary_colors["hover_color"],
-            border_color=colors["border"]
-        )
-
-        self.btn_transcript.configure(
-            fg_color="transparent",
-            hover_color=secondary_colors["hover_color"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        self.btn_folder.configure(
-            fg_color="transparent",
-            hover_color=secondary_colors["hover_color"],
-            border_color=colors["border"],
-            text_color=colors["text_primary"]
-        )
-
-        # Update status label
-        self.lbl_status.configure(text_color=colors["text_secondary"])
-
-        # Update all labels
-        def update_labels(widget):
-            if isinstance(widget, ctk.CTkLabel):
-                widget.configure(text_color=colors["text_primary"])
-            for child in widget.winfo_children():
-                update_labels(child)
-
-        update_labels(self)
+        apply_theme("light" if theme_manager.current_theme == "dark" else "dark")
+        self.btn_theme.configure(text=self._theme_glyph())
 
     def populate_devices(self):
         try:
@@ -2284,13 +1527,7 @@ class TranscriptionApp(ctk.CTk):
         except Exception:
             self.temp_txt_path = None
 
-        # Update button to danger state
-        button_colors = get_button_colors("danger")
-        self.btn_record.configure(
-            text="PARAR GRAVAÇÃO",
-            fg_color=button_colors["fg_color"],
-            hover_color=button_colors["hover_color"]
-        )
+        self._set_record_button(True)
         self.open_transcript_window()
         self.log_transcript("App", "Iniciando conexão...", False)
 
@@ -2303,8 +1540,7 @@ class TranscriptionApp(ctk.CTk):
             self.log_transcript("CRITICO", str(e), True)
             return
 
-        colors = get_colors()
-        self.lbl_status.configure(text="● Gravando", text_color=colors["success"])
+        self.lbl_status.configure(text="● Gravando", text_color=C["success"])
         
         # Store audio queues for streaming
         self.mic_audio_queue = queue.Queue()
@@ -2320,10 +1556,10 @@ class TranscriptionApp(ctk.CTk):
         # Don't create folders here - let stop_recording handle folder creation
         # Transcripts will be buffered until stop_recording creates the proper folder structure
         self.transcript_buffer = []  # Buffer for transcripts until folder is created
+        self._tick_timer()
 
     def stop_recording(self):
-        colors = get_colors()
-        self.lbl_status.configure(text="● Salvando...", text_color=colors["warning"])
+        self.lbl_status.configure(text="● Salvando...", text_color=C["warning"])
         try:
             final_meeting_title = self.meeting_title
             final_user_name = self.user_name
@@ -2376,8 +1612,7 @@ class TranscriptionApp(ctk.CTk):
             self.stop_recording_cleanup()
             # Fallback error handling
             try:
-                colors = get_colors()
-                self.lbl_status.configure(text="● Erro ao salvar", text_color=colors["danger"])
+                self.lbl_status.configure(text="● Erro ao salvar", text_color=C["danger"])
             except:
                 pass
 
@@ -2404,13 +1639,7 @@ class TranscriptionApp(ctk.CTk):
         self.last_final_turn_order.clear()
         self.temp_txt_path = None
 
-        # Reset button to success state
-        button_colors = get_button_colors("success")
-        self.btn_record.configure(
-            text="INICIAR GRAVAÇÃO",
-            fg_color=button_colors["fg_color"],
-            hover_color=button_colors["hover_color"]
-        )
+        self._set_record_button(False)
         self.progress_mic.set(0)
         self.progress_sys.set(0)
 
@@ -2950,7 +2179,7 @@ class TranscriptionApp(ctk.CTk):
         """Finalize recording by building a local title and renaming files."""
         try:
             if getattr(self, 'current_txt_path', None) and os.path.exists(self.current_txt_path):
-                self.lbl_status.configure(text="Definindo título...", text_color="blue")
+                self.lbl_status.configure(text="● Definindo título...", text_color=C["info"])
                 title = self._build_recording_title(
                     meeting_title=meeting_title,
                     user_name=user_name,
@@ -3005,8 +2234,7 @@ class TranscriptionApp(ctk.CTk):
                 self.transcript_window.on_close()
                 self.transcript_window = None
 
-            colors = get_colors()
-            self.lbl_status.configure(text="● Salvo com Sucesso", text_color=colors["success"])
+            self.lbl_status.configure(text="● Salvo com Sucesso", text_color=C["success"])
             os.startfile(folder)
 
         except Exception as e:
@@ -3074,7 +2302,6 @@ class TranscriptionApp(ctk.CTk):
                 return
             self._force_stop_recording()
 
-        theme_manager.remove_theme_callback(self.on_theme_changed)
         self.quit()
 
     def _force_stop_recording(self):

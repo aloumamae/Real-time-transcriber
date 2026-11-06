@@ -1,204 +1,172 @@
 """
-UI Theme System for Real-time Transcriber
-Design tokens and theme management
+Design tokens for Voilà.
+
+Colors are (light, dark) tuples: CustomTkinter swaps them by itself when the
+appearance mode changes, so widgets never need to be recolored by hand.
+Only raw Tk parts (text tags) need `pick()` plus a theme callback.
 """
+
+import json
+import os
 
 import customtkinter as ctk
 
-# Color tokens
-THEMES = {
-    "dark": {
-        "bg": "#0B0F17",
-        "surface": "#111827",
-        "surface2": "#0F172A",
-        "border": "#223046",
-        "text_primary": "#E5E7EB",
-        "text_secondary": "#9CA3AF",
-        "accent": "#3B82F6",
-        "success": "#16A34A",
-        "danger": "#EF4444",
-        "warning": "#F59E0B"
-    },
-    "light": {
-        "bg": "#F8FAFC",
-        "surface": "#FFFFFF",
-        "surface2": "#F1F5F9",
-        "border": "#CBD5E1",
-        "text_primary": "#0F172A",
-        "text_secondary": "#475569",
-        "accent": "#2563EB",
-        "success": "#16A34A",
-        "danger": "#DC2626",
-        "warning": "#D97706"
-    }
+C = {
+    "bg": ("#F5F4F7", "#111015"),
+    "surface": ("#FFFFFF", "#1A1920"),
+    "field": ("#F0EEF3", "#24232B"),
+    "field_hover": ("#E5E2EA", "#2F2D37"),
+    "border": ("#E3E0E8", "#2C2A33"),
+    "pill": ("#FFFFFF", "#3A3843"),
+    "text": ("#1B1A21", "#EDEBF2"),
+    "muted": ("#6E6A7C", "#9692A3"),
+    "accent": ("#EA580C", "#F97316"),
+    "accent_hover": ("#C2410C", "#EA580C"),
+    "danger": ("#DC2626", "#EF4444"),
+    "danger_hover": ("#B91C1C", "#DC2626"),
+    "success": ("#16A34A", "#22C55E"),
+    "warning": ("#D97706", "#F59E0B"),
+    "info": ("#2563EB", "#60A5FA"),
+    "switch_off": ("#D4D0DB", "#3A3843"),
+    "knob": ("#FFFFFF", "#F5F4F7"),
 }
 
-# Radius tokens (in pixels)
-RADIUS = {
-    "card": 12,
-    "input": 10,
-    "button": 14
+FONT = "Segoe UI"
+F = {
+    "title": ("Segoe UI Semibold", 18),
+    "h": ("Segoe UI Semibold", 14),
+    "label": ("Segoe UI Semibold", 12),
+    "body": ("Segoe UI", 13),
+    "small": ("Segoe UI", 11),
+    "button": ("Segoe UI Semibold", 13),
+    "big": ("Segoe UI Semibold", 15),
+    "icon": ("Segoe MDL2 Assets", 15),  # ships with Windows 10/11
 }
 
-# Spacing tokens (in pixels)
-SPACING = {
-    "padding_external": 16,
-    "padding_card": 14,
-    "gap": 12,
-    "input_height": 36,
-    "button_primary_height": 48,
-    "button_secondary_height": 40,
-    "progress_height": 10
+# Segoe MDL2 Assets glyphs
+ICON = {
+    "mic": "",
+    "speaker": "",
+    "settings": "",
+    "sun": "",
+    "moon": "",
+    "eye": "",
+    "zoom_in": "",
+    "zoom_out": "",
 }
+
+UI_CONFIG_FILE = "ui_config.json"
+
 
 class ThemeManager:
-    """Manages theme application and state"""
-
     def __init__(self):
         self.current_theme = "dark"
         self._theme_callbacks = []
 
-    def get_colors(self):
-        """Get current theme colors"""
-        return THEMES[self.current_theme]
-
-    def get_radius(self):
-        """Get radius values"""
-        return RADIUS
-
-    def get_spacing(self):
-        """Get spacing values"""
-        return SPACING
-
     def apply_theme(self, theme_name="dark"):
-        """Apply theme to CustomTkinter and store preference"""
-        if theme_name not in THEMES:
-            theme_name = "dark"
-
-        self.current_theme = theme_name
-
-        # Set CustomTkinter appearance mode
-        if theme_name == "dark":
-            ctk.set_appearance_mode("Dark")
-        else:
-            ctk.set_appearance_mode("Light")
-
-        # Save theme preference
-        self._save_theme_preference(theme_name)
-
-        # Notify listeners
-        for callback in self._theme_callbacks:
+        self.current_theme = theme_name if theme_name in ("dark", "light") else "dark"
+        ctk.set_appearance_mode(self.current_theme)
+        self._save_theme_preference()
+        for callback in list(self._theme_callbacks):
             try:
-                callback(theme_name)
+                callback(self.current_theme)
             except Exception as e:
                 print(f"Error in theme callback: {e}")
 
     def add_theme_callback(self, callback):
-        """Add callback to be called when theme changes"""
         self._theme_callbacks.append(callback)
 
     def remove_theme_callback(self, callback):
-        """Remove theme callback"""
         if callback in self._theme_callbacks:
             self._theme_callbacks.remove(callback)
 
-    def _save_theme_preference(self, theme_name):
-        """Save theme preference to config"""
+    def _save_theme_preference(self):
         try:
-            import json
-            import os
-
-            config_file = "ui_config.json"
             config = {}
-
-            # Load existing config if it exists
-            if os.path.exists(config_file):
-                with open(config_file, "r") as f:
+            if os.path.exists(UI_CONFIG_FILE):
+                with open(UI_CONFIG_FILE, "r") as f:
                     config = json.load(f)
-
-            # Update theme
-            config["theme"] = theme_name
-
-            # Save config
-            with open(config_file, "w") as f:
+            config["theme"] = self.current_theme
+            with open(UI_CONFIG_FILE, "w") as f:
                 json.dump(config, f, indent=2)
-
         except Exception as e:
             print(f"Error saving theme preference: {e}")
 
     def load_theme_preference(self):
-        """Load saved theme preference"""
         try:
-            import json
-            import os
-
-            config_file = "ui_config.json"
-            if os.path.exists(config_file):
-                with open(config_file, "r") as f:
-                    config = json.load(f)
-                    return config.get("theme", "dark")
+            if os.path.exists(UI_CONFIG_FILE):
+                with open(UI_CONFIG_FILE, "r") as f:
+                    return json.load(f).get("theme", "dark")
         except Exception as e:
             print(f"Error loading theme preference: {e}")
-
         return "dark"
 
-# Global theme manager instance
+
 theme_manager = ThemeManager()
 
-def get_colors():
-    """Convenience function to get current colors"""
-    return theme_manager.get_colors()
-
-def get_radius():
-    """Convenience function to get radius values"""
-    return theme_manager.get_radius()
-
-def get_spacing():
-    """Convenience function to get spacing values"""
-    return theme_manager.get_spacing()
 
 def apply_theme(theme_name="dark"):
-    """Convenience function to apply theme"""
     theme_manager.apply_theme(theme_name)
 
+
 def add_theme_callback(callback):
-    """Convenience function to add theme callback"""
     theme_manager.add_theme_callback(callback)
 
-def lighten_color(hex_color, percent=10):
-    """Lighten a hex color by the given percentage"""
-    hex_color = hex_color.lstrip('#')
-    rgb = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
-    # Calculate new RGB values
-    new_rgb = []
-    for c in rgb:
-        new_c = int(c + (255 - c) * (percent / 100))
-        new_rgb.append(min(255, max(0, new_c)))
+def pick(color):
+    """Resolve a (light, dark) token to one hex string for raw Tk options."""
+    return color[1] if theme_manager.current_theme == "dark" else color[0]
 
-    return f"#{new_rgb[0]:02x}{new_rgb[1]:02x}{new_rgb[2]:02x}"
 
-def get_hover_color(base_color, lighten_percent=10):
-    """Get hover color (lighter version of base color)"""
-    return lighten_color(base_color, lighten_percent)
+# --- Widget factories: one place for the look of each control. Keyword args override the defaults. ---
 
-def get_button_colors(button_type):
-    """Get button colors based on type (success, danger, secondary)"""
-    colors = get_colors()
+def card(master):
+    return ctk.CTkFrame(master, fg_color=C["surface"], border_width=1, border_color=C["border"], corner_radius=14)
 
-    if button_type == "success":
-        base = colors["success"]
-        hover = get_hover_color(base, 12)
-    elif button_type == "danger":
-        base = colors["danger"]
-        hover = get_hover_color(base, 12)
-    elif button_type == "secondary":
-        # For secondary buttons, use a slightly lighter surface
-        base = colors["surface"]
-        hover = get_hover_color(base, 8)
-    else:
-        # Default/fallback
-        base = colors["accent"]
-        hover = get_hover_color(base, 10)
 
-    return {"fg_color": base, "hover_color": hover}
+def entry(master, **kw):
+    return ctk.CTkEntry(master, **{
+        "fg_color": C["field"], "border_width": 1, "border_color": C["border"], "text_color": C["text"],
+        "placeholder_text_color": C["muted"], "font": F["body"], "height": 36, "corner_radius": 8, **kw})
+
+
+def combo(master, **kw):
+    return ctk.CTkComboBox(master, **{
+        "state": "readonly", "fg_color": C["field"], "border_width": 1, "border_color": C["border"],
+        "button_color": C["field"], "button_hover_color": C["field_hover"], "text_color": C["text"],
+        "dropdown_fg_color": C["surface"], "dropdown_hover_color": C["field"], "dropdown_text_color": C["text"],
+        "font": F["body"], "dropdown_font": F["body"], "height": 36, "corner_radius": 8, **kw})
+
+
+def segmented(master, values, command):
+    return ctk.CTkSegmentedButton(
+        master, values=values, command=command, font=F["body"], height=34, corner_radius=8,
+        fg_color=C["field"], selected_color=C["pill"], selected_hover_color=C["pill"],
+        unselected_color=C["field"], unselected_hover_color=C["field_hover"], text_color=C["text"]
+    )
+
+
+def switch(master, command):
+    return ctk.CTkSwitch(
+        master, text="", width=44, switch_width=40, switch_height=20, border_width=0, command=command,
+        fg_color=C["switch_off"], progress_color=C["accent"], button_color=C["knob"], button_hover_color=C["knob"]
+    )
+
+
+def primary_button(master, text, command, **kw):
+    return ctk.CTkButton(master, text=text, command=command, **{
+        "font": F["button"], "height": 38, "corner_radius": 10, "fg_color": C["accent"],
+        "hover_color": C["accent_hover"], "text_color": "#FFFFFF", "text_color_disabled": C["muted"], **kw})
+
+
+def secondary_button(master, text, command, **kw):
+    return ctk.CTkButton(master, text=text, command=command, **{
+        "font": F["button"], "height": 38, "corner_radius": 10, "fg_color": C["surface"],
+        "hover_color": C["field"], "border_width": 1, "border_color": C["border"], "text_color": C["text"], **kw})
+
+
+def icon_button(master, glyph, command, size=36):
+    return ctk.CTkButton(
+        master, text=glyph, command=command, font=F["icon"], width=size, height=size, corner_radius=10,
+        fg_color="transparent", hover_color=C["field"], text_color=C["muted"]
+    )
