@@ -39,7 +39,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -495,20 +495,18 @@ def version_tuple(tag):
     return tuple(int(part) for part in re.findall(r"\d+", tag))
 
 
-def github_get(url, token=""):
+def github_get(url):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "Voila-updater"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
         return response.read()
 
 
 def github_error_text(error):
     if isinstance(error, urllib.error.HTTPError):
-        if error.code in (401, 403):
-            return "Token do GitHub inválido ou expirado."
+        if error.code in (403, 429):
+            return "O GitHub limitou as consultas por agora. Tente de novo mais tarde."
         if error.code == 404:
-            return "Repositório ou release não encontrado. Confira o token do GitHub."
+            return "Repositório ou release não encontrado no GitHub."
         return f"GitHub respondeu com erro {error.code}."
     if isinstance(error, urllib.error.URLError):
         return "Sem conexão com o GitHub."
@@ -665,14 +663,11 @@ class SettingsWindow(ctk.CTkToplevel):
 
         # --- Atualizações ---
         body = self._section("Atualizações", f"versão instalada {APP_VERSION}")
-        box = self._field(body, "Token do GitHub", "Token só de leitura, necessário porque o repositório é privado")
+        box = self._field(body, "Procurar versão nova", "O app também confere sozinho sempre que abre")
         row = ctk.CTkFrame(box, fg_color="transparent")
         row.pack(fill="x", pady=(6, 0))
         self.btn_update = primary_button(row, "Atualizar", self.check_for_update, width=110, height=36)
-        self.btn_update.pack(side="right", padx=(8, 0))
-        self.entry_github_token = entry(row, show="•")
-        self.entry_github_token.pack(fill="x")
-        self.entry_github_token.insert(0, self.parent_app.github_token)
+        self.btn_update.pack(side="left")
         self.lbl_update = ctk.CTkLabel(box, text="", font=F["small"], text_color=C["muted"], anchor="w",
                                        justify="left", wraplength=440)
         self.lbl_update.pack(fill="x", pady=(4, 0))
@@ -718,10 +713,6 @@ class SettingsWindow(ctk.CTkToplevel):
             pass  # window closed while the update thread was running
 
     def check_for_update(self):
-        token = self.entry_github_token.get().strip()
-        if token != self.parent_app.github_token:
-            self.parent_app.github_token = token
-            self.parent_app.save_config(show_message=False)
         self.parent_app.check_for_update(self._set_update_status)
 
     def bring_to_front(self):
@@ -1058,7 +1049,6 @@ class TranscriptionApp(ctk.CTk):
 
         self.recorder = AudioRecorder()
         self.api_key = ""
-        self.github_token = ""
         self.is_recording = False
         self.streaming_client_mic = None
         self.streaming_client_sys = None
@@ -1113,9 +1103,8 @@ class TranscriptionApp(ctk.CTk):
         self.populate_devices()
         self._fit_to_content()
         self.after(50, self.process_queue)
-        if self.github_token:
-            # Off the UI thread and after the window is up: no internet / no update = nothing shown.
-            self.after(1500, self.check_for_update)
+        # Off the UI thread and after the window is up: no internet / no update = nothing shown.
+        self.after(1500, self.check_for_update)
 
     # --- Atualização (startup check and the Settings button share this) ---
 
@@ -1136,12 +1125,11 @@ class TranscriptionApp(ctk.CTk):
             status("Pare a gravação antes de atualizar.")
             return
         status("Procurando atualização...", busy=True)
-        token = self.github_token
         url = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
-        self._run_in_background(lambda: json.loads(github_get(url, token)),
-                                lambda release: self._on_latest_release(release, token, status))
+        self._run_in_background(lambda: json.loads(github_get(url)),
+                                lambda release: self._on_latest_release(release, status))
 
-    def _on_latest_release(self, release, token, status):
+    def _on_latest_release(self, release, status):
         if isinstance(release, Exception):
             status(github_error_text(release))
             return
@@ -1167,7 +1155,7 @@ class TranscriptionApp(ctk.CTk):
             status("Pare a gravação antes de atualizar.")
             return
         status(f"Baixando {tag}...", busy=True)
-        self._run_in_background(lambda: install_update(github_get(release["zipball_url"], token), APP_DIR),
+        self._run_in_background(lambda: install_update(github_get(release["zipball_url"]), APP_DIR),
                                 lambda result: self._on_update_installed(result, status))
 
     def _on_update_installed(self, result, status):
@@ -2394,7 +2382,6 @@ class TranscriptionApp(ctk.CTk):
                 with open(CONFIG_FILE, "r") as f:
                     config = json.load(f)
                     self.api_key = config.get("api_key", "")
-                    self.github_token = config.get("github_token", "")
                     self.user_name = config.get("user_name", "Você")
                     self.selected_mic = config.get("selected_mic", "")
                     self.selected_sys = config.get("selected_sys", "")
@@ -2409,7 +2396,6 @@ class TranscriptionApp(ctk.CTk):
     def save_config(self, show_message=True):
         config = {
             "api_key": self.api_key,
-            "github_token": self.github_token,
             "user_name": self.user_name,
             "realtime_transcript": self.realtime_transcript,
             "save_directory": self.save_directory,

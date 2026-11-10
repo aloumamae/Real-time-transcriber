@@ -70,13 +70,9 @@ O programa usa um serviço chamado AssemblyAI para transformar fala em texto. Vo
 
 ### 6. Atualize pelo próprio app
 
-Em **Configurações → Atualizações**, cole o token do GitHub e clique em **Atualizar**. Se houver versão nova, o app baixa, substitui os arquivos e abre de novo. Suas configurações e gravações ficam como estão.
+O app confere sozinho a cada vez que abre e só avisa quando há versão nova. Sem internet ou já atualizado, não aparece nada. Para procurar na hora, vá em **Configurações → Atualizações → Atualizar**. Se houver versão nova, o app baixa, substitui os arquivos e abre de novo. Suas configurações e gravações ficam como estão.
 
-Com o token salvo, o app também confere sozinho a cada vez que abre e só avisa quando há versão nova. Sem internet ou já atualizado, não aparece nada.
-
-Como o repositório é privado, o token é obrigatório. Para criar um (quem é dono do repositório faz isso uma vez):
-github.com → Settings → Developer settings → **Fine-grained tokens** → Generate new token →
-*Repository access*: só `Real-time-transcriber` → *Permissions*: **Contents: Read-only**.
+> Tem uma versão antiga (1.1.4 a 1.1.6) que pedia token do GitHub? Deixe o campo do token vazio e clique em **Atualizar** uma vez. Depois disso, as próximas atualizações chegam sozinhas.
 
 Para quem publica: a cada release, aumente `APP_VERSION` no `main.py` para o mesmo número da tag (ex.: `1.1.4` → tag `v1.1.4`).
 

@@ -431,16 +431,16 @@ class UpdaterTests(unittest.TestCase):
         main.messagebox.askyesno = lambda *a, **k: asked.append(a) or False
         try:
             silent = lambda text, busy=False: None
-            app._on_latest_release(ConnectionError("offline"), "", silent)
-            app._on_latest_release({"tag_name": f"v{main.APP_VERSION}"}, "", silent)
+            app._on_latest_release(ConnectionError("offline"), silent)
+            app._on_latest_release({"tag_name": f"v{main.APP_VERSION}"}, silent)
             self.assertEqual(asked, [])
 
             app.is_recording = True  # never interrupt a meeting
-            app._on_latest_release({"tag_name": "v99.0.0"}, "", silent)
+            app._on_latest_release({"tag_name": "v99.0.0"}, silent)
             self.assertEqual(asked, [])
 
             app.is_recording = False
-            app._on_latest_release({"tag_name": "v99.0.0"}, "", silent)
+            app._on_latest_release({"tag_name": "v99.0.0"}, silent)
             self.assertEqual(len(asked), 1)
         finally:
             main.messagebox.askyesno = original
