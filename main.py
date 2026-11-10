@@ -39,7 +39,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -1062,6 +1062,9 @@ class TranscriptionApp(ctk.CTk):
         self.is_recording = False
         self.streaming_client_mic = None
         self.streaming_client_sys = None
+        self._reconnect_lock = threading.Lock()
+        self._stream_key = ""
+        self._stream_rates = {}
         self.transcript_queue = queue.Queue()
         self.transcript_history = []
         self.partial_transcripts = {}
@@ -1909,6 +1912,8 @@ class TranscriptionApp(ctk.CTk):
                         if time.time() - last_ts >= (self.render_interval_ms / 1000.0):
                             self.last_partial_update[source] = time.time()
                             self.transcript_window.set_partial_line(source, text, ts, self._speaker(source))
+                elif item[0] == "STATUS" and self.is_recording:
+                    self.set_status(item[1], C[item[2]])
         except: pass
         self.after(50, self.process_queue)
 
@@ -2063,41 +2068,87 @@ class TranscriptionApp(ctk.CTk):
 
 
     def _on_error(self, client: StreamingClient, error: StreamingError, source_name):
-        self.transcript_queue.put(("TXT", f"ERRO API {source_name}: {error}", True, datetime.datetime.now()))
+        # The SDK never reuses a client after an error: mark it dead first (the
+        # reconnect loop and the audio callbacks read this), then replace it.
+        client.voila_failed = True
+        source = "mic" if source_name == "Microfone" else "sys"
+        with self._reconnect_lock:
+            current = self.streaming_client_mic if source == "mic" else self.streaming_client_sys
+            if client is not current or not self.is_recording:
+                return  # a failed reconnect attempt, or a connection already replaced
+        now = datetime.datetime.now()
+        code = getattr(error, "code", None)
+        if code == 1008 or (isinstance(code, int) and 400 <= code < 500):
+            # Invalid key / unauthorized / quota: retrying can't fix it.
+            self.transcript_queue.put(("TXT", f"ERRO API {source_name}: {error}", True, now))
+            return
+        self.transcript_queue.put(("TXT", f"[{now:%H:%M:%S}] Conexão {source_name} caiu ({error}). Reconectando...", True, now))
+        self.transcript_queue.put(("STATUS", "● Reconectando...", "warning"))
+        threading.Thread(target=self._reconnect_loop, args=(source, client), daemon=True).start()
+
+    def _reconnect_loop(self, source, dead_client):
+        """Replace a dropped connection in the background; the recording keeps going."""
+        attr = "streaming_client_mic" if source == "mic" else "streaming_client_sys"
+        label = "Microfone" if source == "mic" else "Sistema"
+        delay = 1
+        while True:
+            time.sleep(delay)
+            if not self.is_recording or getattr(self, attr) is not dead_client:
+                return  # stopped, or a device/language switch already reconnected
+            client = self._new_streaming_client(self._stream_key, source)
+            try:
+                # connect() reports failures through _on_error (sets voila_failed), not by raising
+                client.connect(self._get_streaming_params(self._stream_rates[source]))
+            except Exception:
+                client.voila_failed = True
+            with self._reconnect_lock:
+                ok = (not getattr(client, "voila_failed", False) and self.is_recording
+                      and getattr(self, attr) is dead_client)
+                if ok:
+                    self._reset_source_timeline(source)
+                    setattr(self, attr, client)
+            if ok:
+                now = datetime.datetime.now()
+                self.transcript_queue.put(("TXT", f"[{now:%H:%M:%S}] Conexão {label} restabelecida.", True, now))
+                if not any(getattr(c, "voila_failed", False) for c in (self.streaming_client_mic, self.streaming_client_sys)):
+                    self.transcript_queue.put(("STATUS", "● Gravando", "success"))
+                return
+            try:
+                client.disconnect(terminate=True)
+            except Exception:
+                pass
+            delay = min(delay * 2, 30)
+
+    def _reset_source_timeline(self, source):
+        """A new connection restarts audio offsets and turn numbers at 0 for this source."""
+        with self.audio_timeline_lock:
+            self.audio_stream_position_ms[source] = 0.0
+            self.audio_wall_segments[source] = []
+            for key in [k for k in self.turn_start_times if k[0] == source]:
+                del self.turn_start_times[key]
+        self.last_final_turn_order.pop(source, None)
 
     def _on_terminated(self, client: StreamingClient, event: TerminationEvent, source_name):
         # Suppress connection noise in transcript
         return
 
+    def _new_streaming_client(self, key, source):
+        """One AssemblyAI connection for `source` ("mic"/"sys") with handlers attached."""
+        label = "Microfone" if source == "mic" else "Sistema"
+        client = StreamingClient(StreamingClientOptions(api_key=key, api_host="streaming.assemblyai.com"))
+        client.on(StreamingEvents.Begin, lambda c, e: self._on_begin(c, e, label))
+        client.on(StreamingEvents.Turn, lambda c, e: self._on_turn(c, e, source))
+        client.on(StreamingEvents.Error, lambda c, e: self._on_error(c, e, label))
+        client.on(StreamingEvents.Termination, lambda c, e: self._on_terminated(c, e, label))
+        return client
+
     def _connect_streaming_clients(self, key, mic_rate, sys_rate):
         self._reset_audio_timeline(ready=False)
-        # Create microphone streaming client
-        self.streaming_client_mic = StreamingClient(
-            StreamingClientOptions(
-                api_key=key,
-                api_host="streaming.assemblyai.com",
-            )
-        )
-
-        # Create system audio streaming client
-        self.streaming_client_sys = StreamingClient(
-            StreamingClientOptions(
-                api_key=key,
-                api_host="streaming.assemblyai.com",
-            )
-        )
-
-        # Set up event handlers for microphone client
-        self.streaming_client_mic.on(StreamingEvents.Begin, lambda client, event: self._on_begin(client, event, "Microfone"))
-        self.streaming_client_mic.on(StreamingEvents.Turn, lambda client, event: self._on_turn(client, event, "mic"))
-        self.streaming_client_mic.on(StreamingEvents.Error, lambda client, error: self._on_error(client, error, "Microfone"))
-        self.streaming_client_mic.on(StreamingEvents.Termination, lambda client, event: self._on_terminated(client, event, "Microfone"))
-
-        # Set up event handlers for system audio client
-        self.streaming_client_sys.on(StreamingEvents.Begin, lambda client, event: self._on_begin(client, event, "Sistema"))
-        self.streaming_client_sys.on(StreamingEvents.Turn, lambda client, event: self._on_turn(client, event, "sys"))
-        self.streaming_client_sys.on(StreamingEvents.Error, lambda client, error: self._on_error(client, error, "Sistema"))
-        self.streaming_client_sys.on(StreamingEvents.Termination, lambda client, event: self._on_terminated(client, event, "Sistema"))
+        # Remembered so a dropped connection can be rebuilt mid-recording.
+        self._stream_key = key
+        self._stream_rates = {"mic": mic_rate, "sys": sys_rate}
+        self.streaming_client_mic = self._new_streaming_client(key, "mic")
+        self.streaming_client_sys = self._new_streaming_client(key, "sys")
 
         # Connect both clients with selected language settings
         self.streaming_client_mic.connect(self._get_streaming_params(mic_rate))
@@ -2134,7 +2185,7 @@ class TranscriptionApp(ctk.CTk):
             with self.audio_timeline_lock:
                 mic_client = self.streaming_client_mic if self.audio_timeline_ready else None
                 timeline_generation = self.audio_timeline_generation
-            if mic_client:
+            if mic_client and not getattr(mic_client, "voila_failed", False):
                 captured_at = datetime.datetime.now()
                 try:
                     mic_client.stream(audio_data)
@@ -2155,7 +2206,7 @@ class TranscriptionApp(ctk.CTk):
             with self.audio_timeline_lock:
                 sys_client = self.streaming_client_sys if self.audio_timeline_ready else None
                 timeline_generation = self.audio_timeline_generation
-            if sys_client:
+            if sys_client and not getattr(sys_client, "voila_failed", False):
                 captured_at = datetime.datetime.now()
                 try:
                     sys_client.stream(audio_data)

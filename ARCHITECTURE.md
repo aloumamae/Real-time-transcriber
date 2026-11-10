@@ -169,7 +169,9 @@ StreamingParameters(
 ```python
 StreamingEvents.Begin    → "-- Conectado {source} (ID: {event.id}) --"
 StreamingEvents.Turn     → Log apenas turns formatados e finais
-StreamingEvents.Error    → "ERRO API {source}: {error}"
+StreamingEvents.Error    → queda de rede (ex.: code 1006): _reconnect_loop recria só aquela
+                           conexão em background (backoff 1s→30s), mesma gravação e arquivo.
+                           Chave inválida/4xx/1008: "ERRO API {source}: {error}", sem retry.
 StreamingEvents.Termination → "-- Desconectado {source} --"
 ```
 

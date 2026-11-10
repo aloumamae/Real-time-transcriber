@@ -359,6 +359,56 @@ class RenameMidMeetingTests(unittest.TestCase):
         self.assertEqual(window.textbox.text, "[12:00:00] Kevin: Hopefully you're doing well.\n")
 
 
+class ReconnectTests(unittest.TestCase):
+    def test_dropped_connection_is_replaced_and_new_session_turns_are_kept(self):
+        import main
+        app = make_timeline_app()
+        app.is_recording = True
+        app.transcript_queue = queue.Queue()
+        app._reconnect_lock = threading.Lock()
+        app._stream_key = "k"
+        app._stream_rates = {"mic": 16000, "sys": 48000}
+        app.language_choice = "Multilingual"
+        app.last_final_turn_order = {"mic": 42, "sys": 7}
+        app.turn_start_times = {("mic", 3): 1, ("sys", 3): 2}
+
+        attempts = []
+
+        class FakeClient:
+            def connect(self, params):
+                attempts.append(params.sample_rate)
+                if len(attempts) == 1:  # first try: network still down
+                    app._on_error(self, "Connection closed (code=1006)", "Microfone")
+            def disconnect(self, terminate=False):
+                pass
+
+        app._new_streaming_client = lambda key, source: FakeClient()
+        dead, sys_client = FakeClient(), FakeClient()
+        app.streaming_client_mic, app.streaming_client_sys = dead, sys_client
+
+        real_sleep, real_thread = main.time.sleep, main.threading.Thread
+        main.time.sleep = lambda s: None
+        started = []
+        main.threading.Thread = lambda target, args, daemon: SimpleNamespace(start=lambda: started.append(args))
+        try:
+            app._on_error(dead, "Connection closed (code=1006)", "Microfone")
+            self.assertEqual(started, [("mic", dead)])  # one loop, failed attempt spawns none
+            app._reconnect_loop("mic", dead)
+        finally:
+            main.time.sleep, main.threading.Thread = real_sleep, real_thread
+
+        self.assertEqual(attempts, [16000, 16000])
+        self.assertIsNot(app.streaming_client_mic, dead)
+        self.assertIs(app.streaming_client_sys, sys_client)
+        self.assertNotIn("mic", app.last_final_turn_order)  # else new turn 0.. would be dropped
+        self.assertEqual(app.last_final_turn_order["sys"], 7)
+        self.assertEqual(app.turn_start_times, {("sys", 3): 2})
+        items = []
+        while not app.transcript_queue.empty():
+            items.append(app.transcript_queue.get())
+        self.assertIn(("STATUS", "● Gravando", "success"), items)
+
+
 class VuLevelTests(unittest.TestCase):
     def test_meter_tracks_loudness_instead_of_pinning_full(self):
         import numpy as np
