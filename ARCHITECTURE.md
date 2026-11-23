@@ -175,6 +175,26 @@ StreamingEvents.Error    → queda de rede (ex.: code 1006): _reconnect_loop rec
 StreamingEvents.Termination → "-- Desconectado {source} --"
 ```
 
+### Estado por conexão e troca de conexão sem perder falas
+
+Cada conexão recomeça `turn_order` e os offsets de áudio em 0. Por isso tudo que é
+por conexão fica no próprio `StreamingClient` (`voila_last_turn`, `voila_turn_starts`,
+`voila_pos_ms`, `voila_segments`, `voila_rate`, `voila_failed`), criado em
+`_new_streaming_client`. Guardar isso por fonte (mic/sys) fazia o app descartar
+os turnos 0..N da conexão nova como "já registrados" (frases sumiam após trocar idioma).
+
+- **Troca de idioma** (o modelo é fixo por conexão): `_swap_connection` abre a conexão
+  nova, passa o áudio para ela e só então aposenta a antiga com `ForceEndpoint` +
+  `Terminate` (`_retire_client`), que entrega o turno em andamento. A frase vira duas
+  linhas no ponto da troca, sem perda.
+- **Troca de dispositivo**: só reinicia os streams PyAudio. A conexão só é trocada (do
+  mesmo jeito) se a taxa de amostragem mudar; até lá, `_send_audio` não envia áudio
+  com taxa diferente da conexão.
+- **Configurações**: nada é aplicado antes de clicar em Salvar. Participantes e título
+  valem a partir da próxima linha; idioma e captura por app disparam as trocas acima.
+- **Parar**: as duas conexões são aposentadas em paralelo e o app espera os finais
+  (inclusive de conexões ainda fechando após uma troca) antes de fechar o arquivo.
+
 ---
 
 ## 🤖 Integração com OpenAI (Geração de Títulos)
@@ -308,7 +328,7 @@ Recordings/
 
 ### Finalização
 
-1. `client.disconnect(terminate=True)` para ambos os clientes
+1. `ForceEndpoint` + `disconnect(terminate=True)` em paralelo para ambos os clientes, esperando os últimos turnos
 2. `AudioRecorder.stop_recording()` para streams PyAudio
 3. Criar estrutura de pastas baseada em timestamp
 4. Abrir pasta automaticamente (`os.startfile()`)
@@ -355,7 +375,7 @@ openai>=1.0.0           # Cliente API OpenAI (opcional)
 
 - **API Failures**: Graceful disconnect e cleanup
 - **Audio Device Issues**: Fallback para dispositivos disponíveis
-- **Network Issues**: Reconexão automática não implementada
+- **Network Issues**: `_reconnect_loop` recria a conexão que caiu (backoff 1s→30s)
 
 ### Performance
 
