@@ -15,6 +15,7 @@ O melhor de tudo: você vê o texto aparecendo em tempo real enquanto as pessoas
 - **Mostra em tempo real**: Você pode acompanhar a conversa acontecendo ao vivo
 - **Salva organizado**: Os arquivos ficam salvos em pastas por data e hora
 - **Funciona com qualquer idioma**: Entende português, inglês, espanhol e muito mais
+- **Separa quem está falando**: Cada voz do outro lado vira uma linha própria (Participante A, B…). Coloque os participantes nas Configurações **separados por vírgula** e clique no nome de uma linha para dizer quem é: o nome vale para aquela voz na reunião toda
 - **Interface simples**: Fácil de usar, mesmo para quem não entende de computador
 
 ## 🚀 Como usar - Passo a passo

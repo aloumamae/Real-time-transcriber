@@ -9,7 +9,10 @@ import subprocess
 import unicodedata
 import ctypes
 import io
+import itertools
 import re
+import tkinter as tk
+from types import SimpleNamespace
 import zipfile
 import urllib.error
 import urllib.request
@@ -39,7 +42,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -61,6 +64,46 @@ def vu_level(samples):
     rms = np.sqrt(np.mean(np.square(samples, dtype=np.float64)))
     db = 20 * np.log10(max(rms, 1.0) / 32768.0)
     return float(min(max((db - VU_FLOOR_DB) / (VU_CEIL_DB - VU_FLOOR_DB), 0.0), 1.0))
+
+
+# Diarization letters ("A", "B") restart on every connection; this id keeps them apart.
+CONNECTION_IDS = itertools.count(1)
+
+
+def speaker_label(label):
+    """AssemblyAI says "PENDING" (or nothing) when it can't tell who spoke yet."""
+    return label if label and label != "PENDING" else None
+
+
+def speaker_runs(event):
+    """Split a final turn wherever the speaker changes -> [(label or None, text, first word)].
+
+    Usually one run: turns already end when the voice changes. Words without a
+    speaker (short "yeah"s) stay with the run before them.
+    """
+    words = [w for w in event.words if w.word_is_final]
+    runs = []
+    for word in words:
+        label = speaker_label(word.speaker)
+        if runs and label in (None, runs[-1][0]):
+            runs[-1][1].append(word)
+        elif runs and runs[-1][0] is None:  # unattributed opening words join the first speaker
+            runs[-1][0] = label
+            runs[-1][1].append(word)
+        else:
+            runs.append([label, [word]])
+    if len(runs) < 2:
+        return [(speaker_label(event.speaker_label) or (runs[0][0] if runs else None),
+                 event.transcript, words[0] if words else None)]
+    # Keep the formatted transcript's punctuation when it lines up word for word.
+    tokens = event.transcript.split()
+    aligned = len(tokens) == len(words)
+    out, i = [], 0
+    for label, run in runs:
+        text = " ".join(tokens[i:i + len(run)] if aligned else (w.text for w in run))
+        out.append((label, text, run[0]))
+        i += len(run)
+    return out
 
 # Initialize theme system
 apply_theme(theme_manager.load_theme_preference())
@@ -302,6 +345,10 @@ class TranscriptWindow(ctk.CTkToplevel):
         )
         self.textbox.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         self.textbox.configure(state="disabled")
+        # Participants' names are clickable: pick who is speaking.
+        self.textbox.tag_bind("other", "<Button-1>", self.on_speaker_click)
+        self.textbox.tag_bind("other", "<Enter>", lambda _e: self.textbox.configure(cursor="hand2"))
+        self.textbox.tag_bind("other", "<Leave>", lambda _e: self.textbox.configure(cursor=""))
 
         self.on_theme_changed()
         self.bind_zoom_controls()
@@ -479,6 +526,47 @@ class TranscriptWindow(ctk.CTkToplevel):
         if stamp:
             self.textbox.insert(index, stamp, "time")
 
+    def speaker_menu_items(self, line_no):
+        """[(label, action or None)] for the menu of a clicked name; None = not a participant line.
+
+        Text line N is history[N-1] (finals sit above the partial lines).
+        """
+        app = self.parent_app
+        if not 1 <= line_no <= len(app.transcript_history):
+            return None
+        entry = app.transcript_history[line_no - 1]
+        line = entry[3] if len(entry) > 3 else None
+        if not line or line.channel != "sys":
+            return None
+        names = app.participant_names()
+        if not names:
+            return [("Informe os participantes nas Configurações, separados por vírgula", None),
+                    ("Abrir Configurações", app.open_settings_window)]
+        pick_line = [(n, lambda n=n: app.assign_speaker(line, n, whole_voice=False)) for n in names]
+        if not line.voice:  # AssemblyAI couldn't tell the voice (very short line): this line only
+            return pick_line
+        return ([("Esta voz é… (vale para a reunião toda)", None)]
+                + [(n, lambda n=n: app.assign_speaker(line, n)) for n in names]
+                + [("Só esta frase", pick_line)])
+
+    def on_speaker_click(self, event):
+        items = self.speaker_menu_items(int(self.textbox.index(f"@{event.x},{event.y}").split(".")[0]))
+        if items:
+            self._build_menu(self, items).tk_popup(event.x_root, event.y_root)
+
+    def _build_menu(self, parent, items):
+        menu = tk.Menu(parent, tearoff=0, bg=pick(C["surface"]), fg=pick(C["text"]),
+                       activebackground=pick(C["accent"]), disabledforeground=pick(C["muted"]))
+        for label, action in items:
+            if isinstance(action, list):
+                menu.add_separator()
+                menu.add_cascade(label=label, menu=self._build_menu(menu, action))
+            elif action is None:
+                menu.add_command(label=label, state="disabled")
+            else:
+                menu.add_command(label=label, command=action)
+        return menu
+
     def on_theme_changed(self, theme_name=None):
         """Text tags are raw Tk, so they need hex colors for the current mode."""
         for tag, token in (("user", "accent"), ("other", "info"), ("system", "muted"),
@@ -592,9 +680,15 @@ class SettingsWindow(ctk.CTkToplevel):
             self.entry_meeting_title.insert(0, self.parent_app.meeting_title)
         self.entry_meeting_title.bind("<KeyRelease>", self.on_value_changed)
 
-        box = self._field(body, "Participantes", "Separados por espaço")
+        box = self._field(body, "Participantes", "Sempre separados por vírgula — ex.: João, Maria, Carlos")
         self.entry_participants = entry(box)
         self.entry_participants.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(
+            box, font=F["small"], text_color=C["muted"], anchor="w", justify="left", wraplength=420,
+            text="Cada voz do áudio do sistema vira uma linha separada (Participante A, B…). "
+                 "Clique no nome numa linha da transcrição para dizer quem é: vale para aquela voz "
+                 "na reunião toda. A vírgula é o que separa um nome do outro nessa lista.",
+        ).pack(fill="x", pady=(6, 0))
         self.entry_participants.insert(0, self.parent_app.participants)
         self.entry_participants.bind("<KeyRelease>", self.on_value_changed)
 
@@ -1054,6 +1148,7 @@ class TranscriptionApp(ctk.CTk):
         self.user_name = "Você"
         self.participants = "Outros"  # Default participants name for system audio
         self.meeting_title = ""
+        self._reset_speakers()
         self.transcript_buffer = []  # Buffer for transcripts until folder is created
         self.temp_txt_path = None
 
@@ -1649,6 +1744,7 @@ class TranscriptionApp(ctk.CTk):
         # Reset current transcript path for a new session
         self.current_txt_path = None
         self.transcript_history = []  # Clear previous transcript history
+        self._reset_speakers()
         self.partial_transcripts.clear()
         self.partial_block_until.clear()
         self.last_final_text.clear()
@@ -1738,6 +1834,8 @@ class TranscriptionApp(ctk.CTk):
                         self._retire_client(client)
                 for thread in list(self._retiring):
                     thread.join()
+                # Before cleanup resets the participants: names chosen mid-meeting also fix earlier lines.
+                self._rewrite_transcript_file()
                 self.stop_recording_cleanup()
 
             # Ensure all buffered transcripts are written before proceeding
@@ -1792,15 +1890,76 @@ class TranscriptionApp(ctk.CTk):
         """Display name for a channel, read live so mid-meeting renames apply."""
         return self.user_name if channel == "mic" else self.participants
 
-    def log_transcript(self, source, text, is_error=False, timestamp=None, channel=None):
-        if timestamp:
-            time_str = timestamp.strftime("%H:%M:%S")
+    def _reset_speakers(self):
+        self.voice_letters = {}  # (connection id, "A") -> letter shown, unique in the meeting
+        self.voice_names = {}    # (connection id, "A") -> participant picked by clicking a line
+        self._file_lines = []    # every line written to the transcript file, to rewrite names at the end
+
+    def participant_names(self):
+        """Settings 'Participantes' split on commas; the untouched default names nobody."""
+        if self.participants.strip() == "Outros":
+            return []
+        return [n.strip() for n in self.participants.split(",") if n.strip()]
+
+    def _line_name(self, line):
+        """Who a line is shown as: a name picked for this line, then for its voice, then a placeholder."""
+        if line.name:
+            return line.name
+        if not line.voice:
+            return line.source
+        if line.voice in self.voice_names:
+            return self.voice_names[line.voice]
+        names = self.participant_names()
+        if len(names) == 1:
+            return names[0]
+        return f"Participante {self.voice_letters[line.voice]}"
+
+    def _line_msg(self, line):
+        return f"[{line.ts:%H:%M:%S}] {self._line_name(line)}: {line.text}"
+
+    def assign_speaker(self, line, name, whole_voice=True):
+        """Clicked name -> that voice is `name` for the rest of the meeting, earlier lines included.
+
+        whole_voice=False corrects only this line (diarization got it wrong, or had no voice).
+        """
+        if whole_voice and line.voice:
+            self.voice_names[line.voice] = name
         else:
-            time_str = datetime.datetime.now().strftime("%H:%M:%S")
-        msg = f"[{time_str}] {source}: {text}"
-        self.transcript_queue.put(("TXT", msg, is_error, timestamp or datetime.datetime.now(), channel or source))
+            line.name = name
+        self.transcript_history = [
+            (self._line_msg(entry[3]), entry[1], entry[2], entry[3]) if len(entry) > 3 and entry[3] else entry
+            for entry in self.transcript_history
+        ]
+        self.render_transcript_window()
+
+    def _rewrite_transcript_file(self):
+        """Rewrite the file with the final names; untouched when no line came with a voice."""
+        path = getattr(self, "current_txt_path", None)
+        if not path or not any(line.voice or line.name for line in self._file_lines):
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(self._line_msg(line) + "\n" for line in self._file_lines)
+        except Exception as e:
+            print(f"Error rewriting speaker names: {e}")
+
+    def log_transcript(self, source, text, is_error=False, timestamp=None, channel=None, voice=None):
+        """`voice` is (connection id, diarization letter) for system-audio lines, else None."""
+        timestamp = timestamp or datetime.datetime.now()
+        line = None
+        if is_error:
+            msg = f"[{timestamp:%H:%M:%S}] {source}: {text}"
+        else:
+            line = SimpleNamespace(source=source, text=text, ts=timestamp, channel=channel, voice=voice, name=None)
+            if voice:
+                with self._client_lock:
+                    n = len(self.voice_letters)
+                    self.voice_letters.setdefault(voice, chr(65 + n) if n < 26 else str(n + 1))
+            msg = self._line_msg(line)
+        self.transcript_queue.put(("TXT", msg, is_error, timestamp, channel or source, line))
 
         if self.is_recording and not is_error:
+            self._file_lines.append(line)
             if getattr(self, 'current_txt_path', None):
                 try:
                     with open(self.current_txt_path, "a", encoding="utf-8") as f:
@@ -1838,10 +1997,13 @@ class TranscriptionApp(ctk.CTk):
                     is_err = item[2]
                     ts = item[3] if len(item) > 3 else datetime.datetime.now()
                     source = item[4] if len(item) > 4 else None
+                    line = item[5] if len(item) > 5 else None
+                    if line and line.voice:
+                        msg = self._line_msg(line)  # a name picked after this line was queued
                     # Insert in timestamp order and draw only that line; a full
                     # redraw per line is O(n) and froze long meetings.
                     pos = bisect.bisect_right(self.transcript_history, ts, key=lambda x: x[2])
-                    self.transcript_history.insert(pos, (msg, is_err, ts))
+                    self.transcript_history.insert(pos, (msg, is_err, ts, line))
                     if self.transcript_window and self.transcript_window.winfo_exists():
                         if source and not is_err:
                             self.transcript_window.clear_partial_line(source)
@@ -1919,7 +2081,14 @@ class TranscriptionApp(ctk.CTk):
             self.partial_transcripts.pop(source_name, None)
             self.partial_block_until[source_name] = datetime.datetime.now() + datetime.timedelta(milliseconds=600)
             self.last_final_text[source_name] = event.transcript
-        self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
+        if source_name == "mic":
+            self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
+            return
+        # System audio is diarized: one line per voice, labelled per connection.
+        for i, (label, text, word) in enumerate(speaker_runs(event)):
+            at = timestamp if i == 0 else (self._wall_time_for_audio_offset(client, word.start) or timestamp)
+            voice = (client.voila_id, label) if label else None
+            self.log_transcript(self._speaker(source_name), text, False, at, channel=source_name, voice=voice)
 
     def _record_audio_buffer(self, client, byte_count, sample_rate, captured_at=None):
         """Map PCM16 mono bytes just streamed to `client` onto the wall clock.
@@ -2023,7 +2192,7 @@ class TranscriptionApp(ctk.CTk):
             client = self._new_streaming_client(self._stream_key, source, rate)
             try:
                 # connect() reports failures through _on_error (sets voila_failed), not by raising
-                client.connect(self._get_streaming_params(rate))
+                client.connect(self._get_streaming_params(rate, source))
             except Exception:
                 client.voila_failed = True
             with self._client_lock:
@@ -2071,7 +2240,7 @@ class TranscriptionApp(ctk.CTk):
             rate = self._stream_rates[source]
             client = self._new_streaming_client(self._stream_key, source, rate)
             try:
-                client.connect(self._get_streaming_params(rate))
+                client.connect(self._get_streaming_params(rate, source))
             except Exception:
                 client.voila_failed = True
             if client.voila_failed or not self.is_recording:
@@ -2103,6 +2272,7 @@ class TranscriptionApp(ctk.CTk):
         label = "Microfone" if source == "mic" else "Sistema"
         client = StreamingClient(StreamingClientOptions(api_key=key, api_host="streaming.assemblyai.com"))
         client.voila_failed = False
+        client.voila_id = next(CONNECTION_IDS)
         client.voila_rate = rate
         client.voila_last_turn = -1   # highest turn_order already logged
         client.voila_turn_starts = {}  # turn_order -> wall-clock start
@@ -2120,24 +2290,24 @@ class TranscriptionApp(ctk.CTk):
         self._stream_rates = {"mic": mic_rate, "sys": sys_rate}
         self.streaming_client_mic = self._new_streaming_client(key, "mic", mic_rate)
         self.streaming_client_sys = self._new_streaming_client(key, "sys", sys_rate)
-        self.streaming_client_mic.connect(self._get_streaming_params(mic_rate))
-        self.streaming_client_sys.connect(self._get_streaming_params(sys_rate))
+        self.streaming_client_mic.connect(self._get_streaming_params(mic_rate, "mic"))
+        self.streaming_client_sys.connect(self._get_streaming_params(sys_rate, "sys"))
 
-    def _get_streaming_params(self, sample_rate):
-        language = self.language_choice
-        if language == "Inglês":
-            return StreamingParameters(
-                sample_rate=sample_rate,
-                format_turns=True,
-                speech_model="universal-streaming-english",
-                language_detection=False,
-            )
-        return StreamingParameters(
+    def _get_streaming_params(self, sample_rate, source):
+        english = self.language_choice == "Inglês"
+        params = dict(
             sample_rate=sample_rate,
             format_turns=True,
-            speech_model="universal-streaming-multilingual",
-            language_detection=True,
+            speech_model="universal-streaming-english" if english else "universal-streaming-multilingual",
+            language_detection=not english,
         )
+        if source == "sys":
+            # Several people share the system audio: label each voice. The mic is only the user.
+            params["speaker_labels"] = True
+            names = self.participant_names()
+            if names:  # a hard cap; one spare so a guest isn't merged into someone else
+                params["max_speakers"] = min(len(names) + 1, 10)
+        return StreamingParameters(**params)
 
     def _start_audio_streams(self, mic_info, sys_info, restart=False):
         self._stop_sys_app_capture()
@@ -2283,8 +2453,8 @@ class TranscriptionApp(ctk.CTk):
         window.reset_partial_lines()
         window.textbox.configure(state="normal")
         window.textbox.delete("1.0", "end")
-        for entry_msg, entry_err, _ in self.transcript_history:
-            window._insert_line("end-1c", entry_msg, entry_err)
+        for entry in self.transcript_history:
+            window._insert_line("end-1c", entry[0], entry[1])
         window.textbox.configure(state="disabled")
 
         # Append partials after finalized entries

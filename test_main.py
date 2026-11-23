@@ -10,7 +10,7 @@ import os
 import tempfile
 import zipfile
 
-from main import TranscriptWindow, TranscriptionApp, install_update, place_window, version_tuple, vu_level
+from main import TranscriptWindow, TranscriptionApp, install_update, place_window, speaker_runs, version_tuple, vu_level
 from assemblyai.streaming.v3.models import TurnEvent, Word
 
 
@@ -115,6 +115,7 @@ def make_timeline_app():
     app.user_name = "Clarice"
     app.participants = "Outros"
     app._client_lock = threading.Lock()
+    app._reset_speakers()
     return app
 
 
@@ -495,6 +496,116 @@ class ReconnectTests(unittest.TestCase):
         while not app.transcript_queue.empty():
             items.append(app.transcript_queue.get())
         self.assertIn(("STATUS", "● Gravando", "success"), items)
+
+
+def diarized(order, text, speakers, label=None):
+    """Final sys turn whose words carry these speaker letters (one word per letter)."""
+    words = [Word(start=i * 500, end=i * 500 + 400, confidence=1.0, text=f"w{i}", word_is_final=True, speaker=s)
+             for i, s in enumerate(speakers)]
+    return TurnEvent(type="Turn", turn_order=order, turn_is_formatted=True, end_of_turn=True, transcript=text,
+                     end_of_turn_confidence=1.0, words=words, speaker_label=label or speakers[0])
+
+
+def history_lines(app):
+    app.after = lambda *_a, **_k: None
+    app.progress_mic = app.progress_sys = SimpleNamespace(set=lambda _v: None)
+    app.transcript_window = None
+    app.__dict__.setdefault("transcript_history", [])  # Tk's __getattr__ recurses on missing attrs
+    app.last_partial_update, app.render_interval_ms = {}, 0
+    app.process_queue()
+    return [e[0].split("] ", 1)[1] for e in app.transcript_history]
+
+
+class DiarizationTests(unittest.TestCase):
+    def test_turn_is_split_where_the_voice_changes(self):
+        self.assertEqual([(l, t) for l, t, _ in speaker_runs(diarized(0, "Bom dia.", ["A", "A"]))],
+                         [("A", "Bom dia.")])
+        mixed = speaker_runs(diarized(0, "Sim, claro. Espera aí.", ["A", "A", "B", "PENDING"]))
+        self.assertEqual([(l, t) for l, t, _ in mixed], [("A", "Sim, claro."), ("B", "Espera aí.")])
+        self.assertEqual(mixed[1][2].start, 1000)  # second line is timed from its own first word
+        pending = speaker_runs(diarized(0, "Uhum.", ["PENDING"], label="PENDING"))
+        self.assertEqual([(l, t) for l, t, _ in pending], [(None, "Uhum.")])
+
+    def test_each_voice_gets_its_own_line_and_letters_never_repeat_across_connections(self):
+        app = make_turn_app()
+        old, new = make_client(app), make_client(app)
+        app._on_turn(old, diarized(0, "Vamos começar.", ["A", "A"]), "sys")
+        app._on_turn(old, diarized(1, "Antes disso.", ["B", "B"]), "sys")
+        app._on_turn(new, diarized(0, "Voltei.", ["A"]), "sys")  # after a reconnect "A" is someone new
+        app._on_turn(new, diarized(1, "Uhum.", ["PENDING"], label="PENDING"), "sys")
+        app._on_turn(old, turn(9, "eu falando", True), "mic")
+        self.assertEqual(finals(app), ["Participante A: Vamos começar.", "Participante B: Antes disso.",
+                                       "Participante C: Voltei.", "Outros: Uhum.", "Clarice: eu falando"])
+
+    def test_naming_a_voice_renames_its_whole_meeting_and_one_line_can_be_corrected(self):
+        app = make_turn_app()
+        app.participants = "João, Maria"
+        app.render_transcript_window = lambda: None
+        t = lambda s: datetime.datetime(2026, 1, 1, 12, 0, s)
+        client = make_client(app)
+        for n, (text, who) in enumerate([("um", "A"), ("dois", "B"), ("três", "A")]):
+            app._on_turn(client, diarized(n, text, [who]), "sys")
+        lines = history_lines(app)
+        self.assertEqual(lines, ["Participante A: um", "Participante B: dois", "Participante A: três"])
+
+        a_line = app.transcript_history[0][3]
+        app.assign_speaker(a_line, "João")
+        app._on_turn(client, diarized(3, "quatro", ["A"]), "sys")  # later lines of that voice too
+        self.assertEqual(history_lines(app), ["João: um", "Participante B: dois", "João: três", "João: quatro"])
+
+        app.assign_speaker(app.transcript_history[2][3], "Maria", whole_voice=False)
+        self.assertEqual(history_lines(app), ["João: um", "Participante B: dois", "Maria: três", "João: quatro"])
+
+    def test_single_participant_is_shown_by_name(self):
+        app = make_turn_app()
+        app.participants = "Kevin"
+        app._on_turn(make_client(app), diarized(0, "oi", ["A"]), "sys")
+        self.assertEqual(finals(app), ["Kevin: oi"])
+
+    def test_file_is_rewritten_with_final_names(self):
+        app = make_turn_app()
+        app.is_recording = True
+        app.participants = "João, Maria"
+        app.render_transcript_window = lambda: None
+        client = make_client(app)
+        with tempfile.TemporaryDirectory() as folder:
+            app.current_txt_path = os.path.join(folder, "t.txt")
+            app._on_turn(client, diarized(0, "um", ["A"]), "sys")
+            app._on_turn(client, diarized(1, "dois", ["B"]), "sys")
+            history_lines(app)
+            app.assign_speaker(app.transcript_history[1][3], "Maria")
+            app._rewrite_transcript_file()
+            with open(app.current_txt_path, encoding="utf-8") as f:
+                body = [l.split("] ", 1)[1] for l in f.read().splitlines()]
+        self.assertEqual(body, ["Participante A: um", "Maria: dois"])
+
+    def test_clicking_a_name_offers_the_participants(self):
+        app = make_turn_app()
+        app.participants = "Outros"
+        app.open_settings_window = lambda: None
+        client = make_client(app)
+        app._on_turn(client, diarized(0, "um", ["A"]), "sys")
+        app._on_turn(client, turn(1, "meu", True), "mic")
+        history_lines(app)
+        window = make_transcript_window()
+        window.parent_app = app
+
+        self.assertEqual(window.speaker_menu_items(1)[0][1], None)  # no names yet: points to Settings
+        self.assertIsNone(window.speaker_menu_items(2))             # the user's own line
+        self.assertIsNone(window.speaker_menu_items(3))             # past the end
+        app.participants = "João, Maria"
+        labels = [label for label, _ in window.speaker_menu_items(1)]
+        self.assertEqual(labels[1:], ["João", "Maria", "Só esta frase"])
+
+    def test_only_system_audio_is_diarized(self):
+        app = make_turn_app()
+        app.language_choice = "Multilingual"
+        app.participants = "João, Maria, Carlos"
+        sys_params, mic_params = app._get_streaming_params(48000, "sys"), app._get_streaming_params(16000, "mic")
+        self.assertTrue(sys_params.speaker_labels)
+        self.assertEqual(sys_params.max_speakers, 4)
+        self.assertIsNone(mic_params.speaker_labels)
+        self.assertEqual(str(sys_params.speech_model), "universal-streaming-multilingual")
 
 
 class VuLevelTests(unittest.TestCase):
