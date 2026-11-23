@@ -526,43 +526,55 @@ class DiarizationTests(unittest.TestCase):
         pending = speaker_runs(diarized(0, "Uhum.", ["PENDING"], label="PENDING"))
         self.assertEqual([(l, t) for l, t, _ in pending], [(None, "Uhum.")])
 
-    def test_each_voice_gets_its_own_line_and_letters_never_repeat_across_connections(self):
+    def test_each_voice_gets_its_own_line_listing_everyone_until_marked(self):
         app = make_turn_app()
+        app.participants = "João, Maria, Carlos"
         old, new = make_client(app), make_client(app)
         app._on_turn(old, diarized(0, "Vamos começar.", ["A", "A"]), "sys")
         app._on_turn(old, diarized(1, "Antes disso.", ["B", "B"]), "sys")
-        app._on_turn(new, diarized(0, "Voltei.", ["A"]), "sys")  # after a reconnect "A" is someone new
-        app._on_turn(new, diarized(1, "Uhum.", ["PENDING"], label="PENDING"), "sys")
+        app._on_turn(new, diarized(0, "Uhum.", ["PENDING"], label="PENDING"), "sys")
         app._on_turn(old, turn(9, "eu falando", True), "mic")
-        self.assertEqual(finals(app), ["Participante A: Vamos começar.", "Participante B: Antes disso.",
-                                       "Participante C: Voltei.", "Outros: Uhum.", "Clarice: eu falando"])
+        everyone = "João, Maria, Carlos"
+        self.assertEqual(finals(app), [f"{everyone}: Vamos começar.", f"{everyone}: Antes disso.",
+                                       f"{everyone}: Uhum.", "Clarice: eu falando"])
 
-    def test_naming_a_voice_renames_its_whole_meeting_and_one_line_can_be_corrected(self):
+    def test_clicking_names_marks_the_voice_corrects_a_line_and_unmarks(self):
         app = make_turn_app()
         app.participants = "João, Maria"
         app.render_transcript_window = lambda: None
-        t = lambda s: datetime.datetime(2026, 1, 1, 12, 0, s)
-        client = make_client(app)
+        old, new = make_client(app), make_client(app)
         for n, (text, who) in enumerate([("um", "A"), ("dois", "B"), ("três", "A")]):
-            app._on_turn(client, diarized(n, text, [who]), "sys")
-        lines = history_lines(app)
-        self.assertEqual(lines, ["Participante A: um", "Participante B: dois", "Participante A: três"])
+            app._on_turn(old, diarized(n, text, [who]), "sys")
+        app._on_turn(new, diarized(0, "voltei", ["A"]), "sys")  # after a reconnect "A" is someone else
+        everyone = "João, Maria"
+        self.assertEqual(history_lines(app), [f"{everyone}: um", f"{everyone}: dois", f"{everyone}: três",
+                                              f"{everyone}: voltei"])
 
-        a_line = app.transcript_history[0][3]
-        app.assign_speaker(a_line, "João")
-        app._on_turn(client, diarized(3, "quatro", ["A"]), "sys")  # later lines of that voice too
-        self.assertEqual(history_lines(app), ["João: um", "Participante B: dois", "João: três", "João: quatro"])
+        app.pick_speaker(1, 0)  # "João" on line 1: the whole voice, earlier and later lines
+        app._on_turn(old, diarized(3, "quatro", ["A"]), "sys")
+        self.assertEqual(history_lines(app), ["João: um", f"{everyone}: dois", "João: três",
+                                              f"{everyone}: voltei", "João: quatro"])
+        self.assertEqual(app.line_choices(app.transcript_history[0][3]), (["João", "Maria"], "João"))
 
-        app.assign_speaker(app.transcript_history[2][3], "Maria", whole_voice=False)
-        self.assertEqual(history_lines(app), ["João: um", "Participante B: dois", "Maria: três", "João: quatro"])
+        app.pick_speaker(3, 1)  # "Maria" on a line of a named voice: only that line
+        self.assertEqual(history_lines(app)[2], "Maria: três")
+        app.pick_speaker(3, 1)  # the marked name again: back to the voice's name
+        self.assertEqual(history_lines(app)[2], "João: três")
+        app.pick_speaker(1, 0)  # unmark the voice
+        self.assertEqual(history_lines(app)[0], f"{everyone}: um")
 
-    def test_single_participant_is_shown_by_name(self):
+    def test_lines_that_list_nobody_are_not_clickable(self):
         app = make_turn_app()
         app.participants = "Kevin"
-        app._on_turn(make_client(app), diarized(0, "oi", ["A"]), "sys")
-        self.assertEqual(finals(app), ["Kevin: oi"])
+        client = make_client(app)
+        app._on_turn(client, diarized(0, "oi", ["A"]), "sys")
+        app.participants = "Outros"
+        app._on_turn(client, diarized(1, "tchau", ["B"]), "sys")
+        app._on_turn(client, turn(2, "meu", True), "mic")
+        self.assertEqual(history_lines(app), ["Kevin: oi", "Outros: tchau", "Clarice: meu"])
+        self.assertEqual([app.line_choices(e[3]) for e in app.transcript_history], [None, None, None])
 
-    def test_file_is_rewritten_with_final_names(self):
+    def test_saved_file_follows_names_marked_after_the_meeting(self):
         app = make_turn_app()
         app.is_recording = True
         app.participants = "João, Maria"
@@ -573,29 +585,29 @@ class DiarizationTests(unittest.TestCase):
             app._on_turn(client, diarized(0, "um", ["A"]), "sys")
             app._on_turn(client, diarized(1, "dois", ["B"]), "sys")
             history_lines(app)
-            app.assign_speaker(app.transcript_history[1][3], "Maria")
-            app._rewrite_transcript_file()
+            app.pick_speaker(2, 1)  # during the meeting
+            app._rewrite_transcript_file(app.current_txt_path)  # what stop_recording does
+            app.is_recording = False
+            app._saved_txt = (app.current_txt_path, "# Título\n\n")
+            app.pick_speaker(1, 0)  # after the meeting
             with open(app.current_txt_path, encoding="utf-8") as f:
-                body = [l.split("] ", 1)[1] for l in f.read().splitlines()]
-        self.assertEqual(body, ["Participante A: um", "Maria: dois"])
+                body = f.read().splitlines()
+        self.assertEqual(body[0], "# Título")
+        self.assertEqual([l.split("] ", 1)[1] for l in body[2:]], ["João: um", "Maria: dois"])
 
-    def test_clicking_a_name_offers_the_participants(self):
+    def test_window_draws_each_name_as_its_own_clickable_span(self):
         app = make_turn_app()
-        app.participants = "Outros"
-        app.open_settings_window = lambda: None
-        client = make_client(app)
-        app._on_turn(client, diarized(0, "um", ["A"]), "sys")
-        app._on_turn(client, turn(1, "meu", True), "mic")
+        app.participants = "João, Maria"
+        app._on_turn(make_client(app), diarized(0, "um", ["A"]), "sys")
         history_lines(app)
+        msg, _, _, line = app.transcript_history[0]
         window = make_transcript_window()
         window.parent_app = app
+        window.insert_entry(None, msg, False, line)
 
-        self.assertEqual(window.speaker_menu_items(1)[0][1], None)  # no names yet: points to Settings
-        self.assertIsNone(window.speaker_menu_items(2))             # the user's own line
-        self.assertIsNone(window.speaker_menu_items(3))             # past the end
-        app.participants = "João, Maria"
-        labels = [label for label, _ in window.speaker_menu_items(1)]
-        self.assertEqual(labels[1:], ["João", "Maria", "Só esta frase"])
+        self.assertTrue(window.textbox.text.endswith("João, Maria: um\n"))
+        self.assertEqual(window.textbox.tagged["João"], ("pick", "pick0", "other"))
+        self.assertEqual(window.textbox.tagged["Maria"], ("pick", "pick1", "other"))
 
     def test_only_system_audio_is_diarized(self):
         app = make_turn_app()

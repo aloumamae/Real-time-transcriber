@@ -205,15 +205,18 @@ evita juntar um convidado com outra pessoa).
   palavra. `speaker_runs()` corta o turno onde o orador muda; palavras sem orador (`PENDING`,
   falas < ~1 s) ficam com a fala anterior. Turno inteiro sem orador vira linha sem voz.
 - **Voz = (id da conexão, letra)**: as letras recomeçam em "A" a cada conexão (reconexão,
-  troca de idioma), então a voz é guardada com `client.voila_id`. A letra mostrada
-  (`voice_letters`) é única na reunião: depois de uma troca, a voz nova aparece como C, D…
-- **Nomes**: participantes separados por vírgula (`participant_names()`). Clicar no nome de
-  uma linha (tag `other`) abre o menu: escolher um nome grava `voice_names[voz]` e vale para
-  a voz na reunião toda, inclusive linhas anteriores (histórico re-renderizado); "Só esta
-  frase" grava `line.name`. Com um único participante, as linhas já saem com o nome dele.
-- **Arquivo**: escrito linha a linha como antes (proteção contra travamento) com o nome da
-  hora; ao parar, `_rewrite_transcript_file` reescreve com os nomes finais, antes de
-  `stop_recording_cleanup` resetar os participantes. Sem nenhuma voz, o arquivo não é tocado.
+  troca de idioma), então a voz é guardada com `client.voila_id`. As letras nunca aparecem.
+- **Nomes**: participantes separados por vírgula. Enquanto ninguém é marcado, a linha mostra
+  a lista de participantes de quando foi dita (`line.source`), cada nome clicável (tags
+  `pick`/`pickN`, sem menu). `pick_speaker`: voz sem nome → `voice_names[voz]` (vale para a
+  voz na reunião toda, inclusive linhas anteriores); voz já nomeada + outro nome → só aquela
+  linha (`line.name`); o nome marcado de novo → desmarca. Na tela, o marcado fica destacado
+  e os outros apagados; no arquivo vai só o nome marcado (ou a lista, se ninguém foi marcado).
+- **Arquivo**: escrito linha a linha como antes (proteção contra travamento); ao parar,
+  `_rewrite_transcript_file` reescreve com os nomes atuais. Se ainda houver linhas com nomes
+  a marcar, a janela de transcrição fica aberta depois de salvar e cada clique reescreve o
+  arquivo final (`_saved_txt` = caminho já renomeado + cabeçalho do título), até a próxima
+  gravação. Sem nenhuma voz, o arquivo não é tocado.
 
 Limites medidos com a API real (nov/2026): as palavras continuam em tempo real, mas o
 orador só chega quando o turno fecha (~0,5 s após a pessoa parar); interrupções com pausa
@@ -423,5 +426,5 @@ openai>=1.0.0           # Cliente API OpenAI (opcional)
 ---
 
 **Data da Documentação**: Janeiro 2026
-**Versão do Software**: 1.1.9
+**Versão do Software**: 1.1.10
 **Última Revisão**: Integrado título OpenAI diretamente no arquivo de transcrição (arquivo único)

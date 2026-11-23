@@ -11,7 +11,6 @@ import ctypes
 import io
 import itertools
 import re
-import tkinter as tk
 from types import SimpleNamespace
 import zipfile
 import urllib.error
@@ -42,7 +41,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.10"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -345,10 +344,10 @@ class TranscriptWindow(ctk.CTkToplevel):
         )
         self.textbox.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         self.textbox.configure(state="disabled")
-        # Participants' names are clickable: pick who is speaking.
-        self.textbox.tag_bind("other", "<Button-1>", self.on_speaker_click)
-        self.textbox.tag_bind("other", "<Enter>", lambda _e: self.textbox.configure(cursor="hand2"))
-        self.textbox.tag_bind("other", "<Leave>", lambda _e: self.textbox.configure(cursor=""))
+        # Each participant's name on a system-audio line is clickable: mark who spoke.
+        self.textbox.tag_bind("pick", "<Button-1>", self.on_name_click)
+        self.textbox.tag_bind("pick", "<Enter>", lambda _e: self.textbox.configure(cursor="hand2"))
+        self.textbox.tag_bind("pick", "<Leave>", lambda _e: self.textbox.configure(cursor=""))
 
         self.on_theme_changed()
         self.bind_zoom_controls()
@@ -402,14 +401,14 @@ class TranscriptWindow(ctk.CTkToplevel):
     def append_text(self, text, is_error=False):
         self.insert_entry(None, text, is_error)
 
-    def insert_entry(self, line_no, text, is_error=False):
+    def insert_entry(self, line_no, text, is_error=False, line=None):
         """Insert one final entry as text line `line_no` (1-based); None appends.
 
         Finals always sit above the partial lines, so line N == history[N-1].
         """
         follow = self.at_bottom()
         self.textbox.configure(state="normal")
-        self._insert_line("end-1c" if line_no is None else f"{line_no}.0", text, is_error)
+        self._insert_line("end-1c" if line_no is None else f"{line_no}.0", text, is_error, line)
         if follow:
             self.textbox.see("end")
         self.textbox.configure(state="disabled")
@@ -421,13 +420,13 @@ class TranscriptWindow(ctk.CTkToplevel):
         """
         return self.textbox.yview()[1] >= 0.999
 
-    def _insert_line(self, index, text, is_error=False):
+    def _insert_line(self, index, text, is_error=False, line=None):
         # Exactly one text line per entry keeps line numbers == history positions.
         text = text.replace("\n", " ")
         if is_error:
             self.textbox.insert(index, f"⚠️ {text}\n", "error")
         else:
-            self._insert_formatted_text(text, index)
+            self._insert_formatted_text(text, index, line)
 
     def _format_line(self, source, text, timestamp=None):
         if timestamp:
@@ -501,7 +500,7 @@ class TranscriptWindow(ctk.CTkToplevel):
             self._unset_partial_marks(start_mark, end_mark)
         self.partial_lines.clear()
 
-    def _insert_formatted_text(self, text, index="end-1c"):
+    def _insert_formatted_text(self, text, index="end-1c", line=None):
         """Insert text with speaker highlighting at `index`."""
         # Resolve to a fixed position so the two inserts below land together.
         index = self.textbox.index(index)
@@ -520,58 +519,36 @@ class TranscriptWindow(ctk.CTkToplevel):
             tag = "system"
         else:
             tag = "other"
+        choices = self.parent_app.line_choices(line) if line else None
         # Same fixed index: each insert lands before the previous one.
         self.textbox.insert(index, f"{content}\n")
-        self.textbox.insert(index, f"{speaker}: ", tag)
+        if choices:
+            # Every participant's name, each clickable; the one marked stands out.
+            names, chosen = choices
+            self.textbox.insert(index, ": ", "other")
+            for i in reversed(range(len(names))):
+                look = "other" if chosen is None else ("picked" if names[i] == chosen else "unpicked")
+                self.textbox.insert(index, names[i], ("pick", f"pick{i}", look))
+                if i:
+                    self.textbox.insert(index, ", ", "unpicked" if chosen else "other")
+        else:
+            self.textbox.insert(index, f"{speaker}: ", tag)
         if stamp:
             self.textbox.insert(index, stamp, "time")
 
-    def speaker_menu_items(self, line_no):
-        """[(label, action or None)] for the menu of a clicked name; None = not a participant line.
-
-        Text line N is history[N-1] (finals sit above the partial lines).
-        """
-        app = self.parent_app
-        if not 1 <= line_no <= len(app.transcript_history):
-            return None
-        entry = app.transcript_history[line_no - 1]
-        line = entry[3] if len(entry) > 3 else None
-        if not line or line.channel != "sys":
-            return None
-        names = app.participant_names()
-        if not names:
-            return [("Informe os participantes nas Configurações, separados por vírgula", None),
-                    ("Abrir Configurações", app.open_settings_window)]
-        pick_line = [(n, lambda n=n: app.assign_speaker(line, n, whole_voice=False)) for n in names]
-        if not line.voice:  # AssemblyAI couldn't tell the voice (very short line): this line only
-            return pick_line
-        return ([("Esta voz é… (vale para a reunião toda)", None)]
-                + [(n, lambda n=n: app.assign_speaker(line, n)) for n in names]
-                + [("Só esta frase", pick_line)])
-
-    def on_speaker_click(self, event):
-        items = self.speaker_menu_items(int(self.textbox.index(f"@{event.x},{event.y}").split(".")[0]))
-        if items:
-            self._build_menu(self, items).tk_popup(event.x_root, event.y_root)
-
-    def _build_menu(self, parent, items):
-        menu = tk.Menu(parent, tearoff=0, bg=pick(C["surface"]), fg=pick(C["text"]),
-                       activebackground=pick(C["accent"]), disabledforeground=pick(C["muted"]))
-        for label, action in items:
-            if isinstance(action, list):
-                menu.add_separator()
-                menu.add_cascade(label=label, menu=self._build_menu(menu, action))
-            elif action is None:
-                menu.add_command(label=label, state="disabled")
-            else:
-                menu.add_command(label=label, command=action)
-        return menu
+    def on_name_click(self, event):
+        index = self.textbox.index(f"@{event.x},{event.y}")
+        picked = [t for t in self.textbox.tag_names(index) if t.startswith("pick") and t != "pick"]
+        if picked:
+            self.parent_app.pick_speaker(int(index.split(".")[0]), int(picked[0][4:]))
 
     def on_theme_changed(self, theme_name=None):
         """Text tags are raw Tk, so they need hex colors for the current mode."""
         for tag, token in (("user", "accent"), ("other", "info"), ("system", "muted"),
-                           ("time", "muted"), ("partial", "muted"), ("error", "danger")):
+                           ("time", "muted"), ("partial", "muted"), ("error", "danger"),
+                           ("picked", "info"), ("unpicked", "muted")):
             self.textbox.tag_config(tag, foreground=pick(C[token]))
+        self.textbox.tag_config("picked", underline=True)
 
     def on_close(self):
         theme_manager.remove_theme_callback(self.on_theme_changed)
@@ -685,9 +662,10 @@ class SettingsWindow(ctk.CTkToplevel):
         self.entry_participants.pack(fill="x", pady=(6, 0))
         ctk.CTkLabel(
             box, font=F["small"], text_color=C["muted"], anchor="w", justify="left", wraplength=420,
-            text="Cada voz do áudio do sistema vira uma linha separada (Participante A, B…). "
-                 "Clique no nome numa linha da transcrição para dizer quem é: vale para aquela voz "
-                 "na reunião toda. A vírgula é o que separa um nome do outro nessa lista.",
+            text="Cada voz do áudio do sistema vira uma linha separada, com todos os nomes. "
+                 "Se quiser, clique num dos nomes da linha para marcar quem falou: vale para aquela "
+                 "voz na reunião toda, e dá para fazer depois que ela acabar. Clique de novo no nome "
+                 "marcado para desmarcar. A vírgula é o que separa um nome do outro.",
         ).pack(fill="x", pady=(6, 0))
         self.entry_participants.insert(0, self.parent_app.participants)
         self.entry_participants.bind("<KeyRelease>", self.on_value_changed)
@@ -1834,8 +1812,8 @@ class TranscriptionApp(ctk.CTk):
                         self._retire_client(client)
                 for thread in list(self._retiring):
                     thread.join()
-                # Before cleanup resets the participants: names chosen mid-meeting also fix earlier lines.
-                self._rewrite_transcript_file()
+                # Names marked mid-meeting also fix lines written before they were marked.
+                self._rewrite_transcript_file(self.current_txt_path)
                 self.stop_recording_cleanup()
 
             # Ensure all buffered transcripts are written before proceeding
@@ -1891,9 +1869,9 @@ class TranscriptionApp(ctk.CTk):
         return self.user_name if channel == "mic" else self.participants
 
     def _reset_speakers(self):
-        self.voice_letters = {}  # (connection id, "A") -> letter shown, unique in the meeting
-        self.voice_names = {}    # (connection id, "A") -> participant picked by clicking a line
-        self._file_lines = []    # every line written to the transcript file, to rewrite names at the end
+        self.voice_names = {}    # (connection id, "A") -> participant marked by clicking a name
+        self._file_lines = []    # every line written to the transcript file, to rewrite names later
+        self._saved_txt = None   # (path, header) of the finished meeting, still editable by clicking
 
     def participant_names(self):
         """Settings 'Participantes' split on commas; the untouched default names nobody."""
@@ -1902,43 +1880,66 @@ class TranscriptionApp(ctk.CTk):
         return [n.strip() for n in self.participants.split(",") if n.strip()]
 
     def _line_name(self, line):
-        """Who a line is shown as: a name picked for this line, then for its voice, then a placeholder."""
+        """A name marked for this line, then for its voice; otherwise everyone listed when it was said."""
         if line.name:
             return line.name
-        if not line.voice:
-            return line.source
-        if line.voice in self.voice_names:
-            return self.voice_names[line.voice]
-        names = self.participant_names()
-        if len(names) == 1:
-            return names[0]
-        return f"Participante {self.voice_letters[line.voice]}"
+        return self.voice_names.get(line.voice) or line.source
 
     def _line_msg(self, line):
         return f"[{line.ts:%H:%M:%S}] {self._line_name(line)}: {line.text}"
 
-    def assign_speaker(self, line, name, whole_voice=True):
-        """Clicked name -> that voice is `name` for the rest of the meeting, earlier lines included.
+    def line_choices(self, line):
+        """(names, marked name or None) when a system-audio line lists several participants, else None."""
+        if not line or line.channel != "sys" or line.source.strip() == "Outros":
+            return None
+        names = [n.strip() for n in line.source.split(",") if n.strip()]
+        if len(names) < 2:
+            return None
+        chosen = self._line_name(line)
+        return names, (chosen if chosen in names else None)
 
-        whole_voice=False corrects only this line (diarization got it wrong, or had no voice).
+    def pick_speaker(self, line_no, name_index):
+        """Click on a name in text line `line_no` (history[line_no - 1]).
+
+        Unnamed voice -> the whole voice is that person, earlier lines included.
+        Named voice, another name -> only this line (diarization got it wrong).
+        The marked name again -> unmark it.
         """
-        if whole_voice and line.voice:
-            self.voice_names[line.voice] = name
-        else:
+        if not 1 <= line_no <= len(self.transcript_history):
+            return
+        entry = self.transcript_history[line_no - 1]
+        line = entry[3] if len(entry) > 3 else None
+        choices = self.line_choices(line)
+        if not choices or name_index >= len(choices[0]):
+            return
+        name, chosen = choices[0][name_index], choices[1]
+        voice_name = self.voice_names.get(line.voice)
+        if name == chosen:
+            if line.name:
+                line.name = None
+            else:
+                self.voice_names.pop(line.voice, None)
+        elif not line.voice:
             line.name = name
+        elif voice_name:
+            line.name = None if name == voice_name else name
+        else:
+            self.voice_names[line.voice] = name
         self.transcript_history = [
-            (self._line_msg(entry[3]), entry[1], entry[2], entry[3]) if len(entry) > 3 and entry[3] else entry
-            for entry in self.transcript_history
+            (self._line_msg(e[3]), e[1], e[2], e[3]) if len(e) > 3 and e[3] else e
+            for e in self.transcript_history
         ]
         self.render_transcript_window()
+        if not self.is_recording and self._saved_txt:
+            self._rewrite_transcript_file(*self._saved_txt)  # meeting over: keep the saved file in sync
 
-    def _rewrite_transcript_file(self):
-        """Rewrite the file with the final names; untouched when no line came with a voice."""
-        path = getattr(self, "current_txt_path", None)
+    def _rewrite_transcript_file(self, path, header=""):
+        """Rewrite the file with the current names; untouched when no line came with a voice."""
         if not path or not any(line.voice or line.name for line in self._file_lines):
             return
         try:
             with open(path, "w", encoding="utf-8") as f:
+                f.write(header)
                 f.writelines(self._line_msg(line) + "\n" for line in self._file_lines)
         except Exception as e:
             print(f"Error rewriting speaker names: {e}")
@@ -1951,10 +1952,6 @@ class TranscriptionApp(ctk.CTk):
             msg = f"[{timestamp:%H:%M:%S}] {source}: {text}"
         else:
             line = SimpleNamespace(source=source, text=text, ts=timestamp, channel=channel, voice=voice, name=None)
-            if voice:
-                with self._client_lock:
-                    n = len(self.voice_letters)
-                    self.voice_letters.setdefault(voice, chr(65 + n) if n < 26 else str(n + 1))
             msg = self._line_msg(line)
         self.transcript_queue.put(("TXT", msg, is_error, timestamp, channel or source, line))
 
@@ -2007,7 +2004,7 @@ class TranscriptionApp(ctk.CTk):
                     if self.transcript_window and self.transcript_window.winfo_exists():
                         if source and not is_err:
                             self.transcript_window.clear_partial_line(source)
-                        self.transcript_window.insert_entry(pos + 1, msg, is_err)
+                        self.transcript_window.insert_entry(pos + 1, msg, is_err, line)
                 elif item[0] == "PARTIAL":
                     source = item[1]
                     text = item[2]
@@ -2454,7 +2451,7 @@ class TranscriptionApp(ctk.CTk):
         window.textbox.configure(state="normal")
         window.textbox.delete("1.0", "end")
         for entry in self.transcript_history:
-            window._insert_line("end-1c", entry[0], entry[1])
+            window._insert_line("end-1c", entry[0], entry[1], entry[3] if len(entry) > 3 else None)
         window.textbox.configure(state="disabled")
 
         # Append partials after finalized entries
@@ -2533,12 +2530,13 @@ class TranscriptionApp(ctk.CTk):
                 )
 
                 # Add title as header comment to transcript file
+                header = f"# {title}\n\n"
                 try:
                     with open(self.current_txt_path, "r", encoding="utf-8") as f:
                         existing_content = f.read()
 
                     with open(self.current_txt_path, "w", encoding="utf-8") as f:
-                        f.write(f"# {title}\n\n")
+                        f.write(header)
                         f.write(existing_content)
                 except Exception as header_error:
                     print(f"Error adding title header: {header_error}")
@@ -2572,10 +2570,13 @@ class TranscriptionApp(ctk.CTk):
                     except Exception as rename_error:
                         print(f"Error renaming transcript file or folder: {rename_error}")
 
+                # The folder may have been renamed after the file: rebuild the path from both.
+                self._saved_txt = (os.path.join(folder, os.path.basename(self.current_txt_path)), header)
                 self.log_transcript("Sistema", f"Título definido: {title}", False)
 
-            # Close transcript window after recording stops
-            if self.transcript_window and self.transcript_window.winfo_exists():
+            # Close the transcript window, unless it still has participants' names to mark.
+            pickable = any(self.line_choices(line) for line in self._file_lines)
+            if not pickable and self.transcript_window and self.transcript_window.winfo_exists():
                 # Properly close the window to ensure cleanup (removes theme callbacks)
                 self.transcript_window.on_close()
                 self.transcript_window = None
