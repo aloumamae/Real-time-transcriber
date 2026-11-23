@@ -115,6 +115,7 @@ def make_timeline_app():
     app.user_name = "Clarice"
     app.participants = "Outros"
     app._client_lock = threading.Lock()
+    app.diarization = True
     app._reset_speakers()
     return app
 
@@ -609,8 +610,26 @@ class DiarizationTests(unittest.TestCase):
         self.assertEqual(window.textbox.tagged["João"], ("pick", "pick0", "other"))
         self.assertEqual(window.textbox.tagged["Maria"], ("pick", "pick1", "other"))
 
+    def test_turning_voice_separation_off_mid_meeting_swaps_only_system_audio(self):
+        app = make_swap_app("Multilingual")
+        app.diarization = True
+        app.transcript_window = None
+        saved, swapped = [], []
+        app.save_config = lambda show_message=True: saved.append(app.diarization)
+        app._swap_connections_async = swapped.append
+
+        app.set_diarization(True)  # already on: nothing happens
+        app.set_diarization(False)
+        self.assertEqual((saved, swapped), ([False], [("sys",)]))
+        self.assertIsNone(app._get_streaming_params(48000, "sys").speaker_labels)
+
+        app.is_recording = False   # between meetings it is only saved
+        app.set_diarization(True)
+        self.assertEqual((saved, swapped), ([False, True], [("sys",)]))
+
     def test_only_system_audio_is_diarized(self):
         app = make_turn_app()
+        app.diarization = True
         app.language_choice = "Multilingual"
         app.participants = "João, Maria, Carlos"
         sys_params, mic_params = app._get_streaming_params(48000, "sys"), app._get_streaming_params(16000, "mic")

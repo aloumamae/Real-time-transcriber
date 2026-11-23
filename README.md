@@ -15,7 +15,7 @@ O melhor de tudo: você vê o texto aparecendo em tempo real enquanto as pessoas
 - **Mostra em tempo real**: Você pode acompanhar a conversa acontecendo ao vivo
 - **Salva organizado**: Os arquivos ficam salvos em pastas por data e hora
 - **Funciona com qualquer idioma**: Entende português, inglês, espanhol e muito mais
-- **Separa quem está falando**: Cada voz do outro lado vira uma linha própria, com os nomes de todos os participantes (coloque-os nas Configurações **separados por vírgula**). Se quiser, clique num dos nomes da linha para marcar quem falou: vale para aquela voz na reunião toda, e dá para fazer depois que a reunião acaba
+- **Separa quem está falando**: Cada voz do outro lado vira uma linha própria, com os nomes de todos os participantes (coloque-os nas Configurações **separados por vírgula**). Se quiser, clique num dos nomes da linha para marcar quem falou: vale para aquela voz na reunião toda, e dá para fazer depois que a reunião acaba. Dá para desligar em Configurações → **Separar vozes** (fica salvo) ou clicando em "Separar vozes" na janela da transcrição, até no meio da reunião
 - **Interface simples**: Fácil de usar, mesmo para quem não entende de computador
 
 ## 🚀 Como usar - Passo a passo

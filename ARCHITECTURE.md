@@ -197,6 +197,12 @@ os turnos 0..N da conexão nova como "já registrados" (frases sumiam após troc
 
 ### Separação de oradores (diarização) no áudio do sistema
 
+Liga/desliga em `app.diarization` (salvo no `config.json` como `diarization`, padrão ligado),
+pelo switch "Separar vozes" nas Configurações ou pelo indicador clicável na janela da
+transcrição. No meio da reunião, `set_diarization` troca só a conexão `sys` com
+`_swap_connection` (mesma troca sem perda do idioma). Desligado, as linhas vêm sem voz e
+ainda dá para marcar o nome linha a linha.
+
 Só a conexão `sys` usa `speaker_labels=True` (o microfone é só o usuário), no mesmo modelo
 multilingual/english. `max_speakers` = nº de participantes + 1 (limite rígido da API; a folga
 evita juntar um convidado com outra pessoa).
@@ -426,5 +432,5 @@ openai>=1.0.0           # Cliente API OpenAI (opcional)
 ---
 
 **Data da Documentação**: Janeiro 2026
-**Versão do Software**: 1.1.10
+**Versão do Software**: 1.1.11
 **Última Revisão**: Integrado título OpenAI diretamente no arquivo de transcrição (arquivo único)

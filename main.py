@@ -41,7 +41,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.10"
+APP_VERSION = "1.1.11"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -327,6 +327,11 @@ class TranscriptWindow(ctk.CTkToplevel):
         self.lbl_status = ctk.CTkLabel(header, text=status.cget("text"), font=F["small"],
                                        text_color=status.cget("text_color"))
         self.lbl_status.pack(side="right", padx=(0, 12))
+        # Voice separation at a glance; clicking toggles it, even mid-meeting.
+        self.lbl_voices = ctk.CTkLabel(header, text="", font=F["small"], cursor="hand2")
+        self.lbl_voices.pack(side="right", padx=(0, 16))
+        self.lbl_voices.bind("<Button-1>", lambda _e: parent.set_diarization(not parent.diarization))
+        self.show_diarization(parent.diarization)
 
         self.textbox = ctk.CTkTextbox(
             self,
@@ -352,6 +357,10 @@ class TranscriptWindow(ctk.CTkToplevel):
         self.on_theme_changed()
         self.bind_zoom_controls()
         add_theme_callback(self.on_theme_changed)
+
+    def show_diarization(self, enabled):
+        self.lbl_voices.configure(text=f"Separar vozes: {'ligado' if enabled else 'desligado'}",
+                                  text_color=C["info"] if enabled else C["muted"])
 
     def bind_zoom_controls(self):
         """Bind zoom controls to the textbox and window"""
@@ -688,6 +697,17 @@ class SettingsWindow(ctk.CTkToplevel):
         if self.parent_app.realtime_transcript:
             self.switch_realtime.select()
 
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", pady=6)
+        self.switch_diarization = switch(row, self.on_realtime_changed)
+        self.switch_diarization.pack(side="right")
+        ctk.CTkLabel(row, text="Separar vozes", font=F["label"], text_color=C["text"], anchor="w").pack(fill="x")
+        ctk.CTkLabel(row, text="Uma linha por voz no áudio do sistema. Pode ter custo extra na AssemblyAI.\n"
+                               "Também liga/desliga na janela da transcrição, no meio da reunião.",
+                     font=F["small"], text_color=C["muted"], anchor="w", justify="left").pack(fill="x")
+        if self.parent_app.diarization:
+            self.switch_diarization.select()
+
         box = self._field(body, "Áudio do sistema", "Grave o computador inteiro ou só um aplicativo")
         self.combo_output_capture_mode = segmented(
             box, ["Sistema inteiro", "App específico"], self.on_output_capture_mode_changed
@@ -804,6 +824,7 @@ class SettingsWindow(ctk.CTkToplevel):
             "participants": self.entry_participants.get().strip() or "Outros",
             "meeting_title": self.entry_meeting_title.get().strip(),
             "realtime_transcript": bool(self.switch_realtime.get()),
+            "diarization": bool(self.switch_diarization.get()),
             "language_choice": self.combo_language.get().strip(),
             "save_directory": self.entry_save_dir.get().strip(),
             "sys_capture_mode": self.combo_output_capture_mode.get().strip(),
@@ -1039,6 +1060,8 @@ class SettingsWindow(ctk.CTkToplevel):
         app.user_name = new["user_name"]
         app.api_key = new["api_key"]
         app.set_realtime_transcript(new["realtime_transcript"])
+        if new["diarization"] != old["diarization"]:
+            app.set_diarization(new["diarization"])  # mid-meeting: swaps only the system-audio connection
         if new["save_directory"]:
             app.save_directory = new["save_directory"]
         app.sys_capture_mode = new["sys_capture_mode"]
@@ -1103,6 +1126,7 @@ class TranscriptionApp(ctk.CTk):
         self.render_interval_ms = 200
         self.last_partial_update = {}
         self.realtime_transcript = True
+        self.diarization = True  # separate voices on system audio (AssemblyAI speaker_labels)
         self.interrupt_split = True
         self.language_choice = "Multilingual"
         self.mic_enabled = True
@@ -2298,7 +2322,7 @@ class TranscriptionApp(ctk.CTk):
             speech_model="universal-streaming-english" if english else "universal-streaming-multilingual",
             language_detection=not english,
         )
-        if source == "sys":
+        if source == "sys" and self.diarization:
             # Several people share the system audio: label each voice. The mic is only the user.
             params["speaker_labels"] = True
             names = self.participant_names()
@@ -2435,6 +2459,18 @@ class TranscriptionApp(ctk.CTk):
         if changed:
             self._swap_connections_async(changed)
 
+    def set_diarization(self, enabled):
+        """Turn voice separation on/off; saved for next time and, mid-meeting, applied by
+        swapping only the system-audio connection (make-before-break, nothing is lost)."""
+        if enabled == self.diarization:
+            return
+        self.diarization = enabled
+        self.save_config(show_message=False)
+        if self.transcript_window and self.transcript_window.winfo_exists():
+            self.transcript_window.show_diarization(enabled)
+        if self.is_recording:
+            self._swap_connections_async(("sys",))
+
     def switch_language(self):
         """The speech model is fixed per connection, so both are swapped (make-before-break)."""
         if self.is_recording:
@@ -2495,6 +2531,7 @@ class TranscriptionApp(ctk.CTk):
                     self.sys_capture_mode = "Sistema inteiro"
                     self.sys_app_target = config.get("sys_app_target", "")
                     self.realtime_transcript = True
+                    self.diarization = bool(config.get("diarization", True))
             except: pass
 
     def save_config(self, show_message=True):
@@ -2512,6 +2549,7 @@ class TranscriptionApp(ctk.CTk):
         config["sys_enabled"] = self.sys_enabled
         config["sys_capture_mode"] = self.sys_capture_mode
         config["sys_app_target"] = self.sys_app_target
+        config["diarization"] = self.diarization
         with open(CONFIG_FILE, "w") as f:
             json.dump(config, f)
         if show_message:
