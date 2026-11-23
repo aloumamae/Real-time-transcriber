@@ -39,7 +39,7 @@ from ui_theme import (
 
 # --- Configurações ---
 # Bump on every release: the updater compares it with the latest GitHub release tag.
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 UPDATE_REPO = "aloumamae/Real-time-transcriber"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "config.json"
@@ -596,7 +596,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.entry_participants = entry(box)
         self.entry_participants.pack(fill="x", pady=(6, 0))
         self.entry_participants.insert(0, self.parent_app.participants)
-        self.entry_participants.bind("<KeyRelease>", self.on_participants_changed)
+        self.entry_participants.bind("<KeyRelease>", self.on_value_changed)
 
         box = self._field(body, "Idioma")
         self.combo_language = segmented(box, ["Multilingual", "Inglês"], self.on_language_changed)
@@ -829,23 +829,12 @@ class SettingsWindow(ctk.CTkToplevel):
         except Exception:
             pass
 
-    def on_participants_changed(self, event=None):
-        """Called when participants field changes - update immediately and check dirty state"""
-        participants_text = self.entry_participants.get().strip()
-        if participants_text:
-            self.parent_app.participants = participants_text
-        else:
-            self.parent_app.participants = "Outros"
-        self.check_dirty_state()
-
+    # Nothing applies to the running app until Save: a half-typed name or a
+    # mis-click must not reach the transcript or reconnect the API mid-sentence.
     def on_realtime_changed(self):
-        self.parent_app.set_realtime_transcript(bool(self.switch_realtime.get()))
         self.check_dirty_state()
 
     def on_language_changed(self, value):
-        self.parent_app.language_choice = value
-        if self.parent_app.is_recording:
-            self.parent_app.switch_language()
         self.check_dirty_state()
 
     def on_save_dir_changed(self, event=None):
@@ -940,18 +929,7 @@ class SettingsWindow(ctk.CTkToplevel):
             self.refresh_output_apps_async(silent=True)
             self._start_output_apps_auto_refresh()
 
-    def _apply_output_capture_live(self):
-        if not self.parent_app.is_recording:
-            return
-        self.lbl_output_capture_status.configure(text="Aplicando mudanças...")
-        threading.Thread(
-            target=lambda: self.parent_app.switch_recording_devices(show_errors=False),
-            daemon=True
-        ).start()
-        self.after(800, lambda: self.lbl_output_capture_status.configure(text=""))
-
     def on_output_capture_mode_changed(self, value):
-        self.parent_app.sys_capture_mode = value
         self._set_output_capture_controls_state()
         if value == "App específico":
             self.refresh_output_apps_async()
@@ -959,13 +937,9 @@ class SettingsWindow(ctk.CTkToplevel):
         else:
             self._stop_output_apps_auto_refresh()
         self.check_dirty_state()
-        self._apply_output_capture_live()
 
     def on_output_app_changed(self, value):
-        selected = value.strip()
-        self.parent_app.sys_app_target = self.output_app_label_to_exe.get(selected, selected)
         self.check_dirty_state()
-        self._apply_output_capture_live()
 
     def browse_save_directory(self):
         selected = filedialog.askdirectory(
@@ -984,45 +958,34 @@ class SettingsWindow(ctk.CTkToplevel):
         self.lbl_dirty.configure(text="Alterações não salvas" if dirty else "")
 
     def save_settings(self):
-        current_values = self._current_values()
-        if current_values == self.original_values:
+        new = self._current_values()
+        old = self.original_values
+        if new == old:
             return  # No changes to save
 
-        # Save persistent settings (exclude participants)
-        persistent_values = {
-            "user_name": current_values["user_name"],
-            "api_key": current_values["api_key"],
-            "realtime_transcript": current_values["realtime_transcript"],
-            "save_directory": current_values["save_directory"],
-            "sys_capture_mode": current_values["sys_capture_mode"],
-            "sys_app_target": current_values["sys_app_target"]
-        }
+        app = self.parent_app
+        app.user_name = new["user_name"]
+        app.api_key = new["api_key"]
+        app.set_realtime_transcript(new["realtime_transcript"])
+        if new["save_directory"]:
+            app.save_directory = new["save_directory"]
+        app.sys_capture_mode = new["sys_capture_mode"]
+        app.sys_app_target = new["sys_app_target"]
+        # Per-meeting values (reset after each recording).
+        app.participants = new["participants"]
+        app.meeting_title = new["meeting_title"]
+        app.language_choice = new["language_choice"]
+        app.save_config(show_message=False)
 
-        # Check if persistent values changed
-        persistent_original = {k: v for k, v in self.original_values.items() if k not in ("participants", "meeting_title", "language_choice")}
-        if persistent_values != persistent_original:
-            self.parent_app.user_name = current_values["user_name"]
-            self.parent_app.api_key = current_values["api_key"]
-            self.parent_app.set_realtime_transcript(current_values["realtime_transcript"])
-            self.parent_app.save_directory = current_values["save_directory"]
-            self.parent_app.sys_capture_mode = current_values["sys_capture_mode"]
-            self.parent_app.sys_app_target = current_values["sys_app_target"]
-            self.parent_app.save_config(show_message=False)
+        # Mid-recording, only what the API connection depends on is re-applied;
+        # names and title just take effect on the next line.
+        if app.is_recording:
+            if new["language_choice"] != old["language_choice"]:
+                app.switch_language()
+            if (new["sys_capture_mode"], new["sys_app_target"]) != (old["sys_capture_mode"], old["sys_app_target"]):
+                threading.Thread(target=lambda: app.switch_recording_devices(show_errors=False), daemon=True).start()
 
-        # Always update temporary settings for the next meeting.
-        participants_text = current_values["participants"]
-        if participants_text and participants_text != "Outros":
-            self.parent_app.participants = participants_text
-        else:
-            self.parent_app.participants = "Outros"
-        self.parent_app.meeting_title = current_values["meeting_title"]
-        self.parent_app.language_choice = current_values["language_choice"]
-        if current_values["save_directory"]:
-            self.parent_app.save_directory = current_values["save_directory"]
-        self.parent_app.sys_capture_mode = current_values["sys_capture_mode"]
-        self.parent_app.sys_app_target = current_values["sys_app_target"]
-
-        self.original_values = current_values
+        self.original_values = new
         self.on_close()
 
     def on_close(self):
@@ -1052,7 +1015,10 @@ class TranscriptionApp(ctk.CTk):
         self.is_recording = False
         self.streaming_client_mic = None
         self.streaming_client_sys = None
-        self._reconnect_lock = threading.Lock()
+        # Guards which client is current per source and each client's audio timeline.
+        self._client_lock = threading.Lock()
+        self._switch_lock = threading.Lock()  # one connection swap at a time
+        self._retiring = []  # threads gracefully closing replaced connections
         self._stream_key = ""
         self._stream_rates = {}
         self.transcript_queue = queue.Queue()
@@ -1060,7 +1026,6 @@ class TranscriptionApp(ctk.CTk):
         self.partial_transcripts = {}
         self.partial_block_until = {}
         self.last_final_text = {}
-        self.last_final_turn_order = {}
         self.ui_dirty = False
         self.last_ui_render = 0.0
         self.render_interval_ms = 200
@@ -1076,12 +1041,6 @@ class TranscriptionApp(ctk.CTk):
         self.sys_app_capture_thread = None
         self.sys_app_stderr_thread = None
         self.sys_capture_rate = 48000
-        self.audio_timeline_lock = threading.Lock()
-        self.audio_stream_position_ms = {}
-        self.audio_wall_segments = {}
-        self.turn_start_times = {}
-        self.audio_timeline_ready = False
-        self.audio_timeline_generation = 0
         self.last_interrupt_time = {}
         self.last_forced_time = {}
         self.interrupt_cooldown_ms = 800
@@ -1693,8 +1652,7 @@ class TranscriptionApp(ctk.CTk):
         self.partial_transcripts.clear()
         self.partial_block_until.clear()
         self.last_final_text.clear()
-        self.last_final_turn_order.clear()
-        self._reset_audio_timeline(ready=False)
+        self._retiring.clear()
         self.last_interrupt_time.clear()
         self.last_forced_time.clear()
 
@@ -1772,11 +1730,15 @@ class TranscriptionApp(ctk.CTk):
             self.current_txt_path = txt_file_path
             self.flush_transcript_buffer()
 
-            if self.streaming_client_mic:
-                self.streaming_client_mic.disconnect(terminate=True)
-            if self.streaming_client_sys:
-                self.streaming_client_sys.disconnect(terminate=True)
-            self.stop_recording_cleanup()
+            # Close both connections in parallel and wait for every final turn,
+            # including connections still closing after a language/device switch.
+            with self._switch_lock:  # a swap in flight finishes first, then sees is_recording=False
+                for client in (self.streaming_client_mic, self.streaming_client_sys):
+                    if client:
+                        self._retire_client(client)
+                for thread in list(self._retiring):
+                    thread.join()
+                self.stop_recording_cleanup()
 
             # Ensure all buffered transcripts are written before proceeding
             self.flush_transcript_buffer()
@@ -1820,7 +1782,6 @@ class TranscriptionApp(ctk.CTk):
         self.partial_transcripts.clear()
         self.partial_block_until.clear()
         self.last_final_text.clear()
-        self.last_final_turn_order.clear()
         self.temp_txt_path = None
 
         self._set_record_button(False)
@@ -1912,133 +1873,108 @@ class TranscriptionApp(ctk.CTk):
     def _on_turn(self, client: StreamingClient, event: TurnEvent, source_name):
         # source_name is the channel ("mic"/"sys"), never the display name:
         # renaming a speaker mid-turn must not orphan that turn's partial line.
-        turn_key = (source_name, event.turn_order)
+        # Turn numbers and audio offsets restart at 0 on every connection, so
+        # they are tracked on the client: a replaced connection still finishing
+        # its last turn and the new one starting at turn 0 never collide.
+        turn = event.turn_order
         source_enabled = self.mic_enabled if source_name == "mic" else self.sys_enabled
-        if not source_enabled:
+        if not source_enabled or not event.transcript:
             if event.end_of_turn:
-                with self.audio_timeline_lock:
-                    self.turn_start_times.pop(turn_key, None)
-            return
-
-        if not event.transcript:
-            if event.end_of_turn:
-                with self.audio_timeline_lock:
-                    self.turn_start_times.pop(turn_key, None)
+                with self._client_lock:
+                    client.voila_turn_starts.pop(turn, None)
             return
 
         mapped_timestamp = None
         has_word_timing = False
         if event.words:
-            try:
-                start_ms = event.words[0].start
-                if isinstance(start_ms, (int, float)):
-                    has_word_timing = True
-                    mapped_timestamp = self._wall_time_for_audio_offset(source_name, start_ms)
-            except Exception:
-                pass
+            start_ms = event.words[0].start
+            if isinstance(start_ms, (int, float)):
+                has_word_timing = True
+                mapped_timestamp = self._wall_time_for_audio_offset(client, start_ms)
 
-        with self.audio_timeline_lock:
+        with self._client_lock:
             if has_word_timing:
                 # A missing segment can occur during a startup race. Keep one
                 # wall-clock fallback for every revision of this same turn.
-                self.turn_start_times.setdefault(
-                    turn_key, mapped_timestamp or datetime.datetime.now()
-                )
-            timestamp = self.turn_start_times.get(turn_key)
+                client.voila_turn_starts.setdefault(turn, mapped_timestamp or datetime.datetime.now())
+            timestamp = client.voila_turn_starts.get(turn)
+            if event.end_of_turn:
+                client.voila_turn_starts.pop(turn, None)
         if timestamp is None:
             timestamp = datetime.datetime.now()
 
-        if event.transcript and not event.end_of_turn:
+        if not event.end_of_turn:
             other = "sys" if source_name == "mic" else "mic"
             self.last_interrupt_time[source_name] = datetime.datetime.now()
             self._maybe_force_endpoint(other)
-
-        if self.realtime_transcript:
-            if event.end_of_turn:
-                last_turn = self.last_final_turn_order.get(source_name, -1)
-                if event.turn_order <= last_turn:
-                    with self.audio_timeline_lock:
-                        self.turn_start_times.pop(turn_key, None)
-                    return
-                self.last_final_turn_order[source_name] = event.turn_order
-                self.partial_transcripts.pop(source_name, None)
-                self.partial_block_until[source_name] = datetime.datetime.now() + datetime.timedelta(milliseconds=600)
-                self.last_final_text[source_name] = event.transcript
-                self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
-                with self.audio_timeline_lock:
-                    self.turn_start_times.pop(turn_key, None)
-            else:
+            if self.realtime_transcript:
                 self.transcript_queue.put(("PARTIAL", source_name, event.transcript, timestamp))
-        else:
-            if event.end_of_turn:
-                last_turn = self.last_final_turn_order.get(source_name, -1)
-                if event.turn_order <= last_turn:
-                    with self.audio_timeline_lock:
-                        self.turn_start_times.pop(turn_key, None)
-                    return
-                self.last_final_turn_order[source_name] = event.turn_order
-                self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
-                with self.audio_timeline_lock:
-                    self.turn_start_times.pop(turn_key, None)
+            return
 
-    def _reset_audio_timeline(self, ready=True):
-        """Reset stream offsets when a new pair of API connections is used."""
-        with self.audio_timeline_lock:
-            self.audio_stream_position_ms = {"mic": 0.0, "sys": 0.0}
-            self.audio_wall_segments = {"mic": [], "sys": []}
-            self.turn_start_times.clear()
-            self.audio_timeline_ready = ready
-            self.audio_timeline_generation += 1
+        # format_turns sends a turn's final more than once; keep the first.
+        if turn <= client.voila_last_turn:
+            return
+        client.voila_last_turn = turn
+        if self.realtime_transcript:
+            self.partial_transcripts.pop(source_name, None)
+            self.partial_block_until[source_name] = datetime.datetime.now() + datetime.timedelta(milliseconds=600)
+            self.last_final_text[source_name] = event.transcript
+        self.log_transcript(self._speaker(source_name), event.transcript, False, timestamp, channel=source_name)
 
-    def _record_audio_buffer(
-        self, source_name, byte_count, sample_rate, captured_at=None, expected_generation=None
-    ):
-        """Map successfully streamed PCM16 mono bytes to the Windows wall clock."""
+    def _record_audio_buffer(self, client, byte_count, sample_rate, captured_at=None):
+        """Map PCM16 mono bytes just streamed to `client` onto the wall clock.
+
+        Caller holds _client_lock.
+        """
         if not byte_count or not sample_rate:
             return
         captured_at = captured_at or datetime.datetime.now()
         duration_ms = byte_count / (sample_rate * 2.0) * 1000.0
         wall_start = captured_at - datetime.timedelta(milliseconds=duration_ms)
+        stream_start = client.voila_pos_ms
+        stream_end = stream_start + duration_ms
+        segments = client.voila_segments
+        if segments and abs((wall_start - segments[-1]["wall_end"]).total_seconds() * 1000.0) <= 250.0:
+            segments[-1]["stream_end"] = stream_end
+            segments[-1]["wall_end"] = captured_at
+        else:
+            segments.append({
+                "stream_start": stream_start,
+                "stream_end": stream_end,
+                "wall_start": wall_start,
+                "wall_end": captured_at,
+            })
+        client.voila_pos_ms = stream_end
 
-        with self.audio_timeline_lock:
-            if not self.audio_timeline_ready or (
-                expected_generation is not None
-                and expected_generation != self.audio_timeline_generation
-            ):
-                return
-            stream_start = self.audio_stream_position_ms.setdefault(source_name, 0.0)
-            stream_end = stream_start + duration_ms
-            segments = self.audio_wall_segments.setdefault(source_name, [])
-
-            should_merge = False
-            if segments:
-                gap_ms = (wall_start - segments[-1]["wall_end"]).total_seconds() * 1000.0
-                should_merge = abs(gap_ms) <= 250.0
-
-            if should_merge:
-                segments[-1]["stream_end"] = stream_end
-                segments[-1]["wall_end"] = captured_at
-            else:
-                segments.append({
-                    "stream_start": stream_start,
-                    "stream_end": stream_end,
-                    "wall_start": wall_start,
-                    "wall_end": captured_at,
-                })
-            self.audio_stream_position_ms[source_name] = stream_end
-
-    def _wall_time_for_audio_offset(self, source_name, offset_ms):
+    def _wall_time_for_audio_offset(self, client, offset_ms):
         """Convert an AssemblyAI per-connection audio offset to wall time."""
         if not isinstance(offset_ms, (int, float)):
             return None
-        with self.audio_timeline_lock:
-            segments = list(self.audio_wall_segments.get(source_name, ()))
+        with self._client_lock:
+            segments = list(client.voila_segments)
         for segment in reversed(segments):
             if segment["stream_start"] <= offset_ms <= segment["stream_end"]:
                 relative_ms = offset_ms - segment["stream_start"]
                 return segment["wall_start"] + datetime.timedelta(milliseconds=relative_ms)
         return None
 
+    def _send_audio(self, source, audio_data, sample_rate):
+        """Stream one buffer to the current connection of `source`."""
+        captured_at = datetime.datetime.now()
+        # Held across stream(): a swap can't queue the old connection's
+        # Terminate ahead of a chunk that was already headed to it.
+        with self._client_lock:
+            client = self.streaming_client_mic if source == "mic" else self.streaming_client_sys
+            # Audio at another rate (device just switched, its connection not
+            # swapped yet) would be transcribed as noise.
+            if not client or client.voila_failed or client.voila_rate != sample_rate:
+                return
+            try:
+                client.stream(audio_data)
+            except Exception as e:
+                print(f"Error sending {source} audio: {e}")
+                return
+            self._record_audio_buffer(client, len(audio_data), sample_rate, captured_at)
 
     def _maybe_force_endpoint(self, source_name):
         now = datetime.datetime.now()
@@ -2060,10 +1996,10 @@ class TranscriptionApp(ctk.CTk):
         # reconnect loop and the audio callbacks read this), then replace it.
         client.voila_failed = True
         source = "mic" if source_name == "Microfone" else "sys"
-        with self._reconnect_lock:
+        with self._client_lock:
             current = self.streaming_client_mic if source == "mic" else self.streaming_client_sys
             if client is not current or not self.is_recording:
-                return  # a failed reconnect attempt, or a connection already replaced
+                return  # a failed reconnect/swap attempt, or a connection already replaced
         now = datetime.datetime.now()
         code = getattr(error, "code", None)
         if code == 1008 or (isinstance(code, int) and 400 <= code < 500):
@@ -2083,17 +2019,17 @@ class TranscriptionApp(ctk.CTk):
             time.sleep(delay)
             if not self.is_recording or getattr(self, attr) is not dead_client:
                 return  # stopped, or a device/language switch already reconnected
-            client = self._new_streaming_client(self._stream_key, source)
+            rate = self._stream_rates[source]
+            client = self._new_streaming_client(self._stream_key, source, rate)
             try:
                 # connect() reports failures through _on_error (sets voila_failed), not by raising
-                client.connect(self._get_streaming_params(self._stream_rates[source]))
+                client.connect(self._get_streaming_params(rate))
             except Exception:
                 client.voila_failed = True
-            with self._reconnect_lock:
-                ok = (not getattr(client, "voila_failed", False) and self.is_recording
+            with self._client_lock:
+                ok = (not client.voila_failed and self.is_recording
                       and getattr(self, attr) is dead_client)
                 if ok:
-                    self._reset_source_timeline(source)
                     setattr(self, attr, client)
             if ok:
                 now = datetime.datetime.now()
@@ -2107,23 +2043,71 @@ class TranscriptionApp(ctk.CTk):
                 pass
             delay = min(delay * 2, 30)
 
-    def _reset_source_timeline(self, source):
-        """A new connection restarts audio offsets and turn numbers at 0 for this source."""
-        with self.audio_timeline_lock:
-            self.audio_stream_position_ms[source] = 0.0
-            self.audio_wall_segments[source] = []
-            for key in [k for k in self.turn_start_times if k[0] == source]:
-                del self.turn_start_times[key]
-        self.last_final_turn_order.pop(source, None)
+    def _retire_client(self, client):
+        """Close a connection in the background without losing its last turn.
+
+        ForceEndpoint makes the server finalize the turn in progress, and
+        Terminate waits for that final (and the TerminationEvent) before closing.
+        """
+        def close():
+            try:
+                client.force_endpoint()
+                client.disconnect(terminate=True)
+            except Exception:
+                pass
+        thread = threading.Thread(target=close, daemon=True)
+        self._retiring.append(thread)
+        thread.start()
+
+    def _swap_connection(self, source):
+        """Make-before-break: open the replacement with the current language and
+        rate, route audio to it, then retire the old one. Speech is never sent
+        to nowhere and the old connection's unfinished turn is still saved."""
+        attr = "streaming_client_mic" if source == "mic" else "streaming_client_sys"
+        label = "Microfone" if source == "mic" else "Sistema"
+        with self._switch_lock:
+            if not self.is_recording:
+                return
+            rate = self._stream_rates[source]
+            client = self._new_streaming_client(self._stream_key, source, rate)
+            try:
+                client.connect(self._get_streaming_params(rate))
+            except Exception:
+                client.voila_failed = True
+            if client.voila_failed or not self.is_recording:
+                self._retire_client(client)
+                if self.is_recording:
+                    self.log_transcript(label, "Falha ao aplicar a mudança; mantendo a conexão anterior.", True)
+                return
+            with self._client_lock:
+                old = getattr(self, attr)
+                setattr(self, attr, client)
+            if old:
+                self._retire_client(old)
+
+    def _swap_connections_async(self, sources):
+        def work():
+            for source in sources:
+                self._swap_connection(source)
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_terminated(self, client: StreamingClient, event: TerminationEvent, source_name):
         # Suppress connection noise in transcript
         return
 
-    def _new_streaming_client(self, key, source):
-        """One AssemblyAI connection for `source` ("mic"/"sys") with handlers attached."""
+    def _new_streaming_client(self, key, source, rate):
+        """One AssemblyAI connection for `source` ("mic"/"sys") with handlers attached.
+
+        Everything that is per connection lives on the client itself.
+        """
         label = "Microfone" if source == "mic" else "Sistema"
         client = StreamingClient(StreamingClientOptions(api_key=key, api_host="streaming.assemblyai.com"))
+        client.voila_failed = False
+        client.voila_rate = rate
+        client.voila_last_turn = -1   # highest turn_order already logged
+        client.voila_turn_starts = {}  # turn_order -> wall-clock start
+        client.voila_pos_ms = 0.0      # audio streamed so far
+        client.voila_segments = []     # stream offset -> wall clock map
         client.on(StreamingEvents.Begin, lambda c, e: self._on_begin(c, e, label))
         client.on(StreamingEvents.Turn, lambda c, e: self._on_turn(c, e, source))
         client.on(StreamingEvents.Error, lambda c, e: self._on_error(c, e, label))
@@ -2131,18 +2115,13 @@ class TranscriptionApp(ctk.CTk):
         return client
 
     def _connect_streaming_clients(self, key, mic_rate, sys_rate):
-        self._reset_audio_timeline(ready=False)
-        # Remembered so a dropped connection can be rebuilt mid-recording.
+        # Remembered so a connection can be rebuilt mid-recording.
         self._stream_key = key
         self._stream_rates = {"mic": mic_rate, "sys": sys_rate}
-        self.streaming_client_mic = self._new_streaming_client(key, "mic")
-        self.streaming_client_sys = self._new_streaming_client(key, "sys")
-
-        # Connect both clients with selected language settings
+        self.streaming_client_mic = self._new_streaming_client(key, "mic", mic_rate)
+        self.streaming_client_sys = self._new_streaming_client(key, "sys", sys_rate)
         self.streaming_client_mic.connect(self._get_streaming_params(mic_rate))
         self.streaming_client_sys.connect(self._get_streaming_params(sys_rate))
-        # Audio callbacks may now start feeding this fresh pair of connections.
-        self._reset_audio_timeline(ready=True)
 
     def _get_streaming_params(self, sample_rate):
         language = self.language_choice
@@ -2170,43 +2149,13 @@ class TranscriptionApp(ctk.CTk):
             if not self.mic_enabled:
                 self.transcript_queue.put(("VU", "mic", 0))
                 return
-            with self.audio_timeline_lock:
-                mic_client = self.streaming_client_mic if self.audio_timeline_ready else None
-                timeline_generation = self.audio_timeline_generation
-            if mic_client and not getattr(mic_client, "voila_failed", False):
-                captured_at = datetime.datetime.now()
-                try:
-                    mic_client.stream(audio_data)
-                    self._record_audio_buffer(
-                        "mic",
-                        len(audio_data),
-                        mic_info[2],
-                        captured_at,
-                        expected_generation=timeline_generation,
-                    )
-                except Exception as e:
-                    print(f"Error sending mic audio: {e}")
+            self._send_audio("mic", audio_data, mic_info[2])
 
         def sys_audio_callback(audio_data):
             if not self.sys_enabled:
                 self.transcript_queue.put(("VU", "sys", 0))
                 return
-            with self.audio_timeline_lock:
-                sys_client = self.streaming_client_sys if self.audio_timeline_ready else None
-                timeline_generation = self.audio_timeline_generation
-            if sys_client and not getattr(sys_client, "voila_failed", False):
-                captured_at = datetime.datetime.now()
-                try:
-                    sys_client.stream(audio_data)
-                    self._record_audio_buffer(
-                        "sys",
-                        len(audio_data),
-                        target_sys_rate,
-                        captured_at,
-                        expected_generation=timeline_generation,
-                    )
-                except Exception as e:
-                    print(f"Error sending sys audio: {e}")
+            self._send_audio("sys", audio_data, target_sys_rate)
 
         self._sys_audio_callback = sys_audio_callback
 
@@ -2302,39 +2251,27 @@ class TranscriptionApp(ctk.CTk):
                     self.log_transcript("Sistema", "Dispositivos inválidos após atualização.", True)
                 return
 
+        # The API connection only cares about the sample rate, so a new device
+        # keeps the same connection (and the sentence in progress) unless its
+        # rate differs; then that one connection is swapped without losing audio.
+        stream_sys_rate = self.sys_capture_rate if self.sys_capture_mode == "App específico" else sys_info[2]
+        new_rates = {"mic": mic_info[2], "sys": stream_sys_rate}
+        changed = [s for s, rate in new_rates.items() if rate != self._stream_rates.get(s)]
+        self._stream_rates.update(new_rates)
         try:
-            if self.streaming_client_mic:
-                self.streaming_client_mic.disconnect(terminate=True)
-            if self.streaming_client_sys:
-                self.streaming_client_sys.disconnect(terminate=True)
-        except Exception:
-            pass
-
-        try:
-            stream_sys_rate = self.sys_capture_rate if self.sys_capture_mode == "App específico" else sys_info[2]
-            self._connect_streaming_clients(self.api_key.strip(), mic_info[2], stream_sys_rate)
             self._start_audio_streams(mic_info, sys_info, restart=True)
         except Exception as e:
             if show_errors:
                 messagebox.showerror("Erro Áudio", f"Falha ao trocar dispositivos: {e}")
             else:
                 self.log_transcript("Sistema", f"Falha ao trocar dispositivos: {e}", True)
-    def switch_language(self):
-        if not self.is_recording:
-            return
-        try:
-            if self.streaming_client_mic:
-                self.streaming_client_mic.disconnect(terminate=True)
-            if self.streaming_client_sys:
-                self.streaming_client_sys.disconnect(terminate=True)
-        except Exception:
-            pass
+        if changed:
+            self._swap_connections_async(changed)
 
-        try:
-            stream_sys_rate = self.sys_capture_rate if self.sys_capture_mode == "App específico" else self.recorder.sys_rate
-            self._connect_streaming_clients(self.api_key.strip(), self.recorder.mic_rate, stream_sys_rate)
-        except Exception as e:
-            messagebox.showerror("Erro Áudio", f"Falha ao trocar idioma: {e}")
+    def switch_language(self):
+        """The speech model is fixed per connection, so both are swapped (make-before-break)."""
+        if self.is_recording:
+            self._swap_connections_async(("mic", "sys"))
 
 
     def render_transcript_window(self):

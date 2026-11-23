@@ -11,6 +11,7 @@ import tempfile
 import zipfile
 
 from main import TranscriptWindow, TranscriptionApp, install_update, place_window, version_tuple, vu_level
+from assemblyai.streaming.v3.models import TurnEvent, Word
 
 
 class FakeTextbox:
@@ -113,14 +114,13 @@ def make_timeline_app():
     app = object.__new__(TranscriptionApp)
     app.user_name = "Clarice"
     app.participants = "Outros"
-    app.audio_timeline_lock = threading.Lock()
-    app.audio_stream_position_ms = {}
-    app.audio_wall_segments = {}
-    app.turn_start_times = {}
-    app.audio_timeline_ready = False
-    app.audio_timeline_generation = 0
-    app._reset_audio_timeline(ready=True)
+    app._client_lock = threading.Lock()
     return app
+
+
+def make_client(app, source="sys", rate=16000):
+    """A real SDK client object (never connected) carrying Voila's per-connection state."""
+    return TranscriptionApp._new_streaming_client(app, "k", source, rate)
 
 
 class TranscriptPartialMarkTests(unittest.TestCase):
@@ -212,55 +212,147 @@ class SpeakerHighlightTests(unittest.TestCase):
 class AudioTimelineTests(unittest.TestCase):
     def test_first_system_buffer_after_silence_uses_real_wall_time(self):
         app = make_timeline_app()
+        client = make_client(app)
         # A 100 ms buffer that starts at 12:00:20 is delivered at 12:00:20.100.
-        delivered_at = datetime.datetime(2026, 1, 1, 12, 0, 20, 100000)
-        app._record_audio_buffer("sys", 3200, 16000, delivered_at)
+        app._record_audio_buffer(client, 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 20, 100000))
 
-        self.assertEqual(
-            app._wall_time_for_audio_offset("sys", 0),
-            datetime.datetime(2026, 1, 1, 12, 0, 20),
-        )
-        self.assertEqual(
-            app._wall_time_for_audio_offset("sys", 50),
-            datetime.datetime(2026, 1, 1, 12, 0, 20, 50000),
-        )
+        self.assertEqual(app._wall_time_for_audio_offset(client, 0), datetime.datetime(2026, 1, 1, 12, 0, 20))
+        self.assertEqual(app._wall_time_for_audio_offset(client, 50), datetime.datetime(2026, 1, 1, 12, 0, 20, 50000))
 
     def test_separated_blocks_preserve_wall_clock_gap(self):
         app = make_timeline_app()
-        app._record_audio_buffer(
-            "sys", 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 10, 100000)
-        )
-        app._record_audio_buffer(
-            "sys", 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 30, 100000)
-        )
+        client = make_client(app)
+        app._record_audio_buffer(client, 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 10, 100000))
+        app._record_audio_buffer(client, 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 30, 100000))
 
-        self.assertEqual(len(app.audio_wall_segments["sys"]), 2)
+        self.assertEqual(len(client.voila_segments), 2)
         # Offset 100 is both the old segment's end and the new one's start;
         # reverse lookup must choose the newer segment after the real gap.
-        self.assertEqual(
-            app._wall_time_for_audio_offset("sys", 100),
-            datetime.datetime(2026, 1, 1, 12, 0, 30),
-        )
-        self.assertEqual(
-            app._wall_time_for_audio_offset("sys", 150),
-            datetime.datetime(2026, 1, 1, 12, 0, 30, 50000),
-        )
+        self.assertEqual(app._wall_time_for_audio_offset(client, 100), datetime.datetime(2026, 1, 1, 12, 0, 30))
+        self.assertEqual(app._wall_time_for_audio_offset(client, 150), datetime.datetime(2026, 1, 1, 12, 0, 30, 50000))
 
-    def test_late_buffer_from_old_connection_does_not_advance_new_timeline(self):
+    def test_each_connection_has_its_own_timeline(self):
         app = make_timeline_app()
-        old_generation = app.audio_timeline_generation
-        app._reset_audio_timeline(ready=True)
+        old, new = make_client(app), make_client(app)
+        app._record_audio_buffer(old, 3200, 16000, datetime.datetime(2026, 1, 1, 12, 0, 20, 100000))
+        self.assertEqual(new.voila_pos_ms, 0.0)
+        self.assertEqual(new.voila_segments, [])
 
-        app._record_audio_buffer(
-            "sys",
-            3200,
-            16000,
-            datetime.datetime(2026, 1, 1, 12, 0, 20, 100000),
-            expected_generation=old_generation,
-        )
 
-        self.assertEqual(app.audio_stream_position_ms["sys"], 0.0)
-        self.assertEqual(app.audio_wall_segments["sys"], [])
+def turn(order, text, end, start_ms=0):
+    return TurnEvent(
+        type="Turn", turn_order=order, turn_is_formatted=end, end_of_turn=end, transcript=text,
+        end_of_turn_confidence=1.0,
+        words=[Word(start=start_ms, end=start_ms + 100, confidence=1.0, text="w", word_is_final=end)],
+    )
+
+
+def make_turn_app():
+    app = make_timeline_app()
+    app.is_recording = False  # log_transcript then only queues (no file)
+    app.mic_enabled = app.sys_enabled = True
+    app.realtime_transcript = True
+    app.transcript_queue = queue.Queue()
+    app.partial_transcripts, app.partial_block_until, app.last_final_text = {}, {}, {}
+    app.last_interrupt_time, app.last_forced_time = {}, {}
+    app.interrupt_cooldown_ms = 800
+    app.streaming_client_mic = app.streaming_client_sys = None
+    return app
+
+
+def make_swap_app(language):
+    app = make_turn_app()
+    app.is_recording = True
+    app._switch_lock = threading.Lock()
+    app._retiring = []
+    app._stream_key = "k"
+    app._stream_rates = {"mic": 16000, "sys": 16000}
+    app.language_choice = language
+    return app
+
+
+def finals(app):
+    items = []
+    while not app.transcript_queue.empty():
+        item = app.transcript_queue.get()
+        if item[0] == "TXT":
+            items.append(item[1].split("] ", 1)[1])
+    return items
+
+
+class LanguageSwitchTests(unittest.TestCase):
+    def test_turns_of_a_new_connection_are_kept_after_a_switch(self):
+        """Regression (23/11/2026 meeting): after switching language mid-meeting, the
+        new connection's turns 0..N were dropped as 'already logged' because the
+        last turn number was remembered per source instead of per connection."""
+        app = make_turn_app()
+        old, new = make_client(app), make_client(app)
+        for n in range(4):
+            app._on_turn(old, turn(n, f"old {n}", True), "sys")
+        # Old connection finishing the cut sentence while the new one starts at 0.
+        app._on_turn(new, turn(0, "It's still shaping up", False), "sys")
+        app._on_turn(old, turn(4, "old cut sentence", True), "sys")
+        app._on_turn(new, turn(0, "It's still shaping up because the weather", True), "sys")
+        app._on_turn(new, turn(0, "duplicate final of the same turn", True), "sys")
+        app._on_turn(new, turn(1, "next", True), "sys")
+
+        self.assertEqual(finals(app), [
+            "Outros: old 0", "Outros: old 1", "Outros: old 2", "Outros: old 3",
+            "Outros: old cut sentence", "Outros: It's still shaping up because the weather", "Outros: next",
+        ])
+
+    def test_swap_opens_new_connection_before_finishing_the_old_one(self):
+        app = make_swap_app("Inglês")
+        calls = []
+        old = make_client(app)
+        old.force_endpoint = lambda: calls.append("old.force_endpoint")
+        old.disconnect = lambda terminate=False: calls.append(("old.disconnect", terminate))
+        app.streaming_client_sys = old
+
+        made = []
+        def fake_new(key, source, rate):
+            client = make_client(app, source, rate)
+            client.connect = lambda params: calls.append(("new.connect", str(params.speech_model)))
+            made.append(client)
+            return client
+        app._new_streaming_client = fake_new
+
+        app._swap_connection("sys")
+        for thread in app._retiring:
+            thread.join()
+
+        self.assertIs(app.streaming_client_sys, made[0])
+        self.assertEqual(calls, [("new.connect", "universal-streaming-english"),
+                                 "old.force_endpoint", ("old.disconnect", True)])
+
+    def test_failed_swap_keeps_the_old_connection(self):
+        app = make_swap_app("Multilingual")
+        app.log_transcript = lambda *a, **k: None
+        old = make_client(app)
+        app.streaming_client_sys = old
+
+        def fake_new(key, source, rate):
+            client = make_client(app, source, rate)
+            def connect(params):
+                client.voila_failed = True  # what _on_error does on a handshake failure
+            client.connect = connect
+            client.disconnect = lambda terminate=False: None
+            client.force_endpoint = lambda: None
+            return client
+        app._new_streaming_client = fake_new
+
+        app._swap_connection("sys")
+        self.assertIs(app.streaming_client_sys, old)
+
+    def test_audio_at_a_different_rate_is_not_sent(self):
+        app = make_turn_app()
+        sent = []
+        client = make_client(app, "sys", 48000)
+        client.stream = sent.append
+        app.streaming_client_sys = client
+        app._send_audio("sys", bytes(960), 44100)
+        app._send_audio("sys", bytes(960), 48000)
+        self.assertEqual(len(sent), 1)
 
 
 class OrderedHistoryTests(unittest.TestCase):
@@ -360,36 +452,34 @@ class RenameMidMeetingTests(unittest.TestCase):
 
 
 class ReconnectTests(unittest.TestCase):
-    def test_dropped_connection_is_replaced_and_new_session_turns_are_kept(self):
+    def test_dropped_connection_is_replaced(self):
         import main
-        app = make_timeline_app()
+        app = make_turn_app()
         app.is_recording = True
-        app.transcript_queue = queue.Queue()
-        app._reconnect_lock = threading.Lock()
         app._stream_key = "k"
         app._stream_rates = {"mic": 16000, "sys": 48000}
         app.language_choice = "Multilingual"
-        app.last_final_turn_order = {"mic": 42, "sys": 7}
-        app.turn_start_times = {("mic", 3): 1, ("sys", 3): 2}
 
         attempts = []
 
-        class FakeClient:
-            def connect(self, params):
+        def fake_new(key, source, rate):
+            client = make_client(app, source, rate)
+            def connect(params):
                 attempts.append(params.sample_rate)
                 if len(attempts) == 1:  # first try: network still down
-                    app._on_error(self, "Connection closed (code=1006)", "Microfone")
-            def disconnect(self, terminate=False):
-                pass
+                    app._on_error(client, "Connection closed (code=1006)", "Microfone")
+            client.connect = connect
+            client.disconnect = lambda terminate=False: None
+            return client
 
-        app._new_streaming_client = lambda key, source: FakeClient()
-        dead, sys_client = FakeClient(), FakeClient()
+        app._new_streaming_client = fake_new
+        dead, sys_client = make_client(app, "mic"), make_client(app, "sys")
         app.streaming_client_mic, app.streaming_client_sys = dead, sys_client
 
         real_sleep, real_thread = main.time.sleep, main.threading.Thread
         main.time.sleep = lambda s: None
         started = []
-        main.threading.Thread = lambda target, args, daemon: SimpleNamespace(start=lambda: started.append(args))
+        main.threading.Thread = lambda target=None, args=(), daemon=None: SimpleNamespace(start=lambda: started.append(args))
         try:
             app._on_error(dead, "Connection closed (code=1006)", "Microfone")
             self.assertEqual(started, [("mic", dead)])  # one loop, failed attempt spawns none
@@ -399,10 +489,8 @@ class ReconnectTests(unittest.TestCase):
 
         self.assertEqual(attempts, [16000, 16000])
         self.assertIsNot(app.streaming_client_mic, dead)
+        self.assertEqual(app.streaming_client_mic.voila_last_turn, -1)  # new session's turn 0 is kept
         self.assertIs(app.streaming_client_sys, sys_client)
-        self.assertNotIn("mic", app.last_final_turn_order)  # else new turn 0.. would be dropped
-        self.assertEqual(app.last_final_turn_order["sys"], 7)
-        self.assertEqual(app.turn_start_times, {("sys", 3): 2})
         items = []
         while not app.transcript_queue.empty():
             items.append(app.transcript_queue.get())
