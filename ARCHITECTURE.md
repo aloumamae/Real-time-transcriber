@@ -195,6 +195,31 @@ os turnos 0..N da conexão nova como "já registrados" (frases sumiam após troc
 - **Parar**: as duas conexões são aposentadas em paralelo e o app espera os finais
   (inclusive de conexões ainda fechando após uma troca) antes de fechar o arquivo.
 
+### Separação de oradores (diarização) no áudio do sistema
+
+Só a conexão `sys` usa `speaker_labels=True` (o microfone é só o usuário), no mesmo modelo
+multilingual/english. `max_speakers` = nº de participantes + 1 (limite rígido da API; a folga
+evita juntar um convidado com outra pessoa).
+
+- **Turno → linhas**: cada turno final traz `speaker_label` ("A", "B"…) e o orador de cada
+  palavra. `speaker_runs()` corta o turno onde o orador muda; palavras sem orador (`PENDING`,
+  falas < ~1 s) ficam com a fala anterior. Turno inteiro sem orador vira linha sem voz.
+- **Voz = (id da conexão, letra)**: as letras recomeçam em "A" a cada conexão (reconexão,
+  troca de idioma), então a voz é guardada com `client.voila_id`. A letra mostrada
+  (`voice_letters`) é única na reunião: depois de uma troca, a voz nova aparece como C, D…
+- **Nomes**: participantes separados por vírgula (`participant_names()`). Clicar no nome de
+  uma linha (tag `other`) abre o menu: escolher um nome grava `voice_names[voz]` e vale para
+  a voz na reunião toda, inclusive linhas anteriores (histórico re-renderizado); "Só esta
+  frase" grava `line.name`. Com um único participante, as linhas já saem com o nome dele.
+- **Arquivo**: escrito linha a linha como antes (proteção contra travamento) com o nome da
+  hora; ao parar, `_rewrite_transcript_file` reescreve com os nomes finais, antes de
+  `stop_recording_cleanup` resetar os participantes. Sem nenhuma voz, o arquivo não é tocado.
+
+Limites medidos com a API real (nov/2026): as palavras continuam em tempo real, mas o
+orador só chega quando o turno fecha (~0,5 s após a pessoa parar); interrupções com pausa
+≥ 150 ms viram linha nova; fala sobreposta não é separada (vai para a voz dominante e as
+palavras por cima podem sumir). Os rótulos valem só para a reunião atual.
+
 ---
 
 ## 🤖 Integração com OpenAI (Geração de Títulos)
@@ -398,5 +423,5 @@ openai>=1.0.0           # Cliente API OpenAI (opcional)
 ---
 
 **Data da Documentação**: Janeiro 2026
-**Versão do Software**: 1.2.1
+**Versão do Software**: 1.1.9
 **Última Revisão**: Integrado título OpenAI diretamente no arquivo de transcrição (arquivo único)
